@@ -1,10 +1,13 @@
-# Use Python native image as it natively handles C-compiled Pandas/Matplotlib flawlessly
-FROM python:3.11-slim
+# Use Node 20 as base image to support modern Vite 8 and React 19 builds Native
+FROM node:20-bookworm-slim
 
-# Install system dependencies and Node.js v18
-RUN apt-get update && apt-get install -y curl && \
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
-    apt-get install -y nodejs
+# Install Python 3.11 and pip
+RUN apt-get update && apt-get install -y python3 python3-pip python3-venv && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Create a virtual environment for Python tools
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # Set working directory for the application
 WORKDIR /app
