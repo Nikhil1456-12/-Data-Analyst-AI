@@ -16,6 +16,9 @@ const upload = multer({ dest: 'uploads/' });
 
 const app = express();
 app.use(cors());
+
+// In-Memory cache for LLM AI Queries
+const queryCache = new Map();
 app.use(express.json());
 
 // Setup static file serving for the React Frontend in production
@@ -34,6 +37,10 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
       const result = await processAndImportFile(file.path, file.originalname);
       results.push(`${result.rowsCount} rows into \`${result.tableName}\``);
     }
+    
+    // Invalidate the query cache whenever new data is uploaded to prevent stale insights
+    queryCache.clear();
+
     res.json({ success: true, message: `Successfully imported: ${results.join(', ')}` });
   } catch (error) {
     console.error('File processing error:', error);
@@ -96,6 +103,12 @@ app.post('/api/query', async (req, res) => {
   }
 
   try {
+    const cacheKey = query.trim().toLowerCase();
+    if (queryCache.has(cacheKey)) {
+      console.log('Cache hit for query:', cacheKey);
+      return res.json(queryCache.get(cacheKey));
+    }
+
     // 1. Convert NL to SQL
     const sqlQuery = await processNLQuery(query);
     
@@ -137,12 +150,17 @@ app.post('/api/query', async (req, res) => {
       }
     }
 
-    res.json({
+    const resultPayload = {
       sql: sqlQuery,
       data: dbResult,
       insights,
       chartImage
-    });
+    };
+
+    // Cache the result for subsequent identical queries
+    queryCache.set(cacheKey, resultPayload);
+
+    res.json(resultPayload);
 
   } catch (error) {
     console.error(error);

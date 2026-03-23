@@ -15,7 +15,7 @@ let dbConfig = {
   queueLimit: 0
 };
 
-let pool = mysql.createPool(dbConfig);
+export let pool = mysql.createPool(dbConfig);
 
 export async function switchDatabase(newDbName) {
   if (pool) await pool.end();

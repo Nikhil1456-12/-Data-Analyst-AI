@@ -66,20 +66,10 @@ export async function processAndImportFile(filePath, originalFilename) {
   });
 }
 
-// Ensure `executeQuery` in DB can handle unrestricted setup for this internal workflow.
-// We will export a bypass mechanism or create a new internal connection to bypass read-only.
-import mysql from 'mysql2/promise';
-import dotenv from 'dotenv';
-dotenv.config();
-const internalPool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'test',
-});
+import { pool } from './db.js';
 
 async function importData(tableName, headers, rows) {
-  const connection = await internalPool.getConnection();
+  const connection = await pool.getConnection();
   try {
     // Disable FK checks to allow out-of-order foreign key data loading
     await connection.execute('SET FOREIGN_KEY_CHECKS=0');
