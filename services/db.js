@@ -15,6 +15,14 @@ let dbConfig = {
   queueLimit: 0
 };
 
+function sanitizeName(name, maxLen = 63) {
+  let san = name.replace(/[^a-zA-Z0-9]/g, '_');
+  san = san.replace(/_+/g, '_');
+  if (san.length > maxLen) san = san.slice(0, maxLen);
+  if (/^[0-9]/.test(san)) san = 'col_' + san;
+  return san || 'col';
+}
+
 export let pool = mysql.createPool(dbConfig);
 
 export async function switchDatabase(newDbName) {
@@ -34,7 +42,11 @@ export async function getDatabases() {
 export async function executeQuery(sql) {
   // Security check has been removed per user request to allow full CRUD capability
   // Note: Ensure `multipleStatements: true` is configured if dealing with complex scripts, but we stick to queries.
+  // Guard: truncate any identifier that exceeds MySQL's max length to avoid silent errors
   try {
+    sql = sql.replace(/`([^`]+)`/g, (_, id) => {
+      return `\`${id.length > 63 ? id.slice(0, 63) : id}\``;
+    });
     const [rows, fields] = await pool.execute(sql);
     return rows;
   } catch (error) {
@@ -51,7 +63,7 @@ export async function getDatabaseSchema() {
     for (let i = 0; i < tables.length; i++) {
         const tableName = Object.values(tables[i])[0];
         const [columns] = await pool.execute(`DESCRIBE \`${tableName}\``);
-        const colNames = columns.map(c => c.Field).join(', ');
+        const colNames = columns.map(c => sanitizeName(c.Field)).join(', ');
         schemaStr += `Table: ${tableName} | Columns: ${colNames}\n`;
     }
     
@@ -78,8 +90,10 @@ export async function getDatabaseInfo() {
 
 export async function getTableStats(tableName) {
   try {
+    // Defensive truncation
+    if (tableName.length > 63) tableName = tableName.slice(0, 63);
     const [cols] = await pool.execute(`DESCRIBE \`${tableName}\``);
-    const validCols = cols.filter(c => c.Field !== '__internal_id' && c.Field !== 'id').map(c => `\`${c.Field}\``);
+    const validCols = cols.filter(c => c.Field !== '_id' && c.Field !== 'id').map(c => `\`${sanitizeName(c.Field)}\``);
     
     let totalNulls = 0;
     let totalDuplicates = 0;

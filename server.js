@@ -11,15 +11,21 @@ import { processAndImportFile } from './services/fileUpload.js';
 
 dotenv.config();
 
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({
+  dest: 'uploads/',
+  limits: {
+    fileSize: 250 * 1024 * 1024, // 250 MB per file
+    files: 20                    // max 20 files per request
+  }
+});
 
 
 const app = express();
 app.use(cors());
+app.use(express.json({ limit: '100mb' }));
 
 // In-Memory cache for LLM AI Queries
 const queryCache = new Map();
-app.use(express.json());
 
 // Setup static file serving for the React Frontend in production
 const __filename = fileURLToPath(import.meta.url);
