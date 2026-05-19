@@ -178,9 +178,12 @@ async function importData(tableName, headers, rows) {
   try {
     await connection.execute('SET FOREIGN_KEY_CHECKS=0');
 
+    const safeTableName = sanitizeName(tableName);
+    await connection.execute(`DROP TABLE IF EXISTS \`${safeTableName}\``);
+
     const createTableStmt = generateCreateTableSql(tableName, headers);
     await connection.execute(createTableStmt);
-    console.log('[fileUpload] CREATE TABLE OK | table:%s rows:%d cols:%d', tableName, rows.length, headers.length);
+    console.log('[fileUpload] CREATE TABLE OK | table:%s rows:%d cols:%d', safeTableName, rows.length, headers.length);
 
     // Prepare batch values payload
     const insertStmt = generateInsertSql(tableName, headers, rows.length);
