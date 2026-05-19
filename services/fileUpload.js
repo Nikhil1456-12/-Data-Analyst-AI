@@ -1,7 +1,9 @@
 import fs from 'fs';
 import csv from 'csv-parser';
 import * as xlsx from 'xlsx';
-import pdfParse from 'pdf-parse';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const pdfParse = require('pdf-parse');
 import { executeQuery } from './db.js';
 import { parsePDFTableToJSON } from './llm.js';
 
@@ -40,7 +42,7 @@ function generateInsertSql(tableName, headers, rowCount) {
 }
 
 export async function processAndImportFile(filePath, originalFilename) {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     let tableName = sanitizeName(originalFilename.split('.')[0]);
     
     let headers = [];
