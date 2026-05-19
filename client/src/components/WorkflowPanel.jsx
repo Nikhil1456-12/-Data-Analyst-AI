@@ -3,6 +3,7 @@ import './panels.css';
 
 const WORKFLOW_STEPS = [
   { id: 'PARSING', label: 'NL to SQL Parsing' },
+  { id: 'VALIDATING', label: 'Validating SQL' },
   { id: 'EXECUTING', label: 'Executing Query' },
   { id: 'INSIGHTS', label: 'Generating Insights' },
   { id: 'CHART', label: 'Python Visualization' },

@@ -76,6 +76,12 @@ export default function ResultsPanel({ result, sqlHistory }) {
             <img src={chartImage} alt="Data Visualization" className="chart-image" />
           </div>
         )}
+        {!chartImage && result.vizSkipped && (
+          <div className="result-card chart-card">
+            <h3>📈 Visualization</h3>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', margin: 0 }}>{result.vizSkipped}</p>
+          </div>
+        )}
 
         {/* Data Table Section */}
         <div className="result-card table-card">

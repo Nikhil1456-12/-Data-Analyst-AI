@@ -9,8 +9,11 @@ const openai = new OpenAI({
   baseURL: 'https://api.groq.com/openai/v1',
 });
 
-export async function processNLQuery(nlQuery) {
-  const schema = await getDatabaseSchema();
+export async function processNLQuery(nlQuery, activeTable = null) {
+  let schema = await getDatabaseSchema();
+  if (activeTable) {
+      schema = `FOCUS EXCLUSIVELY ON THIS TABLE:\n` + schema.split('\n').filter(l => l.includes(`Table: ${activeTable}`)).join('\n') + `\n\nFull Schema Context:\n${schema}`;
+  }
 
   const prompt = `You are an expert Data Analyst and MySQL developer.
 Given the user's natural language request, convert it to a valid MySQL query based on the following schema:
@@ -114,9 +117,13 @@ except Exception as e:
     return pythonCode;
 }
 
-export async function generateSuggestions(history = []) {
-  const schema = await getDatabaseSchema();
+export async function generateSuggestions(history = [], activeTable = null) {
+  let schema = await getDatabaseSchema();
   if (!schema || schema.length < 5) return [];
+
+  if (activeTable) {
+      schema = `FOCUS EXCLUSIVELY ON THIS TABLE:\n` + schema.split('\n').filter(l => l.includes(`Table: ${activeTable}`)).join('\n');
+  }
 
   const historyStr = history.length > 0 ? `DO NOT SUGGEST ANY OF THESE PREVIOUS QUERIES:\n- ${history.join('\n- ')}` : '';
 

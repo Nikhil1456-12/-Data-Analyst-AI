@@ -3,13 +3,13 @@ import csv from 'csv-parser';
 import * as xlsx from 'xlsx';
 import { executeQuery } from './db.js';
 
-function sanitizeName(name, maxLen = 63) {
-  let san = name.replace(/[^a-zA-Z0-9]/g, '_');
-  // Collapse consecutive underscores
+function sanitizeName(name, maxLen = 50) {
+  if (!name) return 'col';
+  let san = String(name).trim().replace(/[^a-zA-Z0-9]/g, '_');
   san = san.replace(/_+/g, '_');
-  if (san.length > maxLen) san = san.slice(0, maxLen);
-  // Strip leading digits
   if (/^[0-9]/.test(san)) san = 'col_' + san;
+  if (san.length > maxLen) san = san.slice(0, maxLen);
+  san = san.replace(/_$/, ''); // strip trailing underscore
   return san || 'col';
 }
 
@@ -45,6 +45,7 @@ export async function processAndImportFile(filePath, originalFilename) {
     let rows = [];
 
     const isExcel = filePath.endsWith('.xlsx') || filePath.endsWith('.xls');
+    const isJson = filePath.endsWith('.json');
 
     if (isExcel) {
       try {
@@ -54,17 +55,9 @@ export async function processAndImportFile(filePath, originalFilename) {
         if (!ws['!ref']) {
           return resolve({ tableName, rowsCount: 0 });
         }
-        // Use readFile + sheet_to_json for Excel; the workbook is already
-        // decompressed-to-memory by xlsx.readFile (XLSX is ZIP, so even a
-        // 250 MB XLSX typically decompresses to << 1 GB of JSON-equivalent
-        // objects for web-analyst workloads).
-        //
-        // For truly tiny memory Excel-only use, replace this block with
-        // `xlsx.stream` (v0.19+), but v0.18.5 does not expose that API.
         rows = xlsx.utils.sheet_to_json(ws);
         if (rows.length === 0) return resolve({ tableName, rowsCount: 0 });
         headers = Object.keys(rows[0]).map(h => sanitizeName(h));
-        // Rebuild rows dict with sanitised keys
         rows = rows.map(r => {
           const out = {};
           headers.forEach((h, idx) => {
@@ -77,14 +70,54 @@ export async function processAndImportFile(filePath, originalFilename) {
       } catch (err) {
         reject(err);
       }
+    } else if (isJson) {
+      try {
+        const rawData = fs.readFileSync(filePath, 'utf8');
+        const parsed = JSON.parse(rawData);
+        const dataArr = Array.isArray(parsed) ? parsed : [parsed];
+        if (dataArr.length === 0) return resolve({ tableName, rowsCount: 0 });
+        
+        // Extract all unique keys from all objects to form complete headers
+        const keySet = new Set();
+        dataArr.forEach(obj => {
+           if (obj && typeof obj === 'object') {
+               Object.keys(obj).forEach(k => keySet.add(k));
+           }
+        });
+        const originalHeaders = Array.from(keySet);
+        headers = originalHeaders.map(h => sanitizeName(h));
+        
+        rows = dataArr.map(r => {
+          const out = {};
+          headers.forEach((h, idx) => {
+            const origKey = originalHeaders[idx];
+            let val = r[origKey];
+            if (val !== null && typeof val === 'object') val = JSON.stringify(val);
+            out[h] = val ?? null;
+          });
+          return out;
+        });
+        importData(tableName, headers, rows).then(resolve).catch(reject);
+      } catch (err) {
+        reject(err);
+      }
     } else {
-      // Assume CSV
+      // Assume CSV or TXT
       fs.createReadStream(filePath)
         .pipe(csv())
         .on('headers', (h) => {
-          headers = h;
+          headers = h.map(name => sanitizeName(name));
         })
-        .on('data', (data) => rows.push(data))
+        .on('data', (data) => {
+          // Re-map row keys to match sanitized headers
+          const out = {};
+          Object.keys(data).forEach((origKey, idx) => {
+            if (headers[idx]) {
+              out[headers[idx]] = data[origKey];
+            }
+          });
+          rows.push(out);
+        })
         .on('end', () => {
           if (rows.length === 0) return resolve({ tableName, rowsCount: 0 });
           importData(tableName, headers, rows).then(resolve).catch(reject);

@@ -16,6 +16,7 @@ function App() {
   const [askedQuestions, setAskedQuestions] = useState([]);
   const [dbInfo, setDbInfo] = useState(null);
   const [databases, setDatabases] = useState([]);
+  const [activeTable, setActiveTable] = useState(null);
 
   const fetchDatabases = async () => {
     try {
@@ -27,12 +28,12 @@ function App() {
     }
   };
 
-  const fetchSuggestions = async (historyObj = askedQuestions) => {
+  const fetchSuggestions = async (historyObj = askedQuestions, tableContext = activeTable) => {
     try {
       const response = await fetch('/api/suggestions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ history: historyObj })
+        body: JSON.stringify({ history: historyObj, activeTable: tableContext })
       });
       const data = await response.json();
       if (data.suggestions) setSuggestions(data.suggestions);
@@ -65,7 +66,8 @@ function App() {
         body: JSON.stringify({ database: newDb })
       });
       fetchDbInfo();
-      fetchSuggestions([]);
+      setActiveTable(null);
+      fetchSuggestions([], null);
       setMessages(prev => [...prev, { role: 'system', content: `Environment switched securely to database: ${newDb}` }]);
     } catch (err) {
       console.error(err);
@@ -117,49 +119,41 @@ function App() {
     setWorkflowState('PARSING');
     setResultData(null);
 
-    try {
-      // Step 1: Parsing
-      setTimeout(() => setWorkflowState('EXECUTING'), 1000);
-      
-      const response = await fetch('/api/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: userQuery })
-      });
+    const params = new URLSearchParams({ query: userQuery });
+    if (activeTable) {
+        params.append('activeTable', activeTable);
+    }
 
-      const text = await response.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (parseErr) {
-        throw new Error(`Server returned HTML (Backend crashed or wrong port): ${text.substring(0, 60)}...`);
-      }
+    const eventSource = new EventSource(`/api/query/stream?${params.toString()}`);
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Server Error');
-      }
+    eventSource.addEventListener('state', (e) => {
+        const state = JSON.parse(e.data);
+        setWorkflowState(state);
+    });
 
-      setWorkflowState('INSIGHTS');
-      
-      setWorkflowState('CHART');
-      
-      // Artificial delay to show workflow steps gracefully if it processed too fast
-      setTimeout(() => {
+    eventSource.addEventListener('result', (e) => {
+        const data = JSON.parse(e.data);
         setResultData(data);
         if (data.sql) setSqlHistory(prev => [...prev, data.sql]);
-        setWorkflowState('DONE');
         setMessages(prev => [...prev, { role: 'system', content: `Query executed successfully! Found ${data.data?.length || 0} rows.` }]);
-        
-        // Refresh DB Info in case they ran a CREATE/DROP or INSERT query
         fetchDbInfo();
         fetchSuggestions(newAsked);
-      }, 500);
+        eventSource.close();
+    });
 
-    } catch (error) {
-      console.error(error);
-      setWorkflowState('ERROR');
-      setMessages(prev => [...prev, { role: 'system', content: `Error: ${error.message}` }]);
-    }
+    eventSource.addEventListener('error', (e) => {
+        let msg = 'An error occurred during query processing.';
+        try {
+             // SSE sometimes sends raw strings or JSON
+             msg = JSON.parse(e.data);
+        } catch {
+             msg = e.data || msg;
+        }
+        console.error("SSE Error:", msg);
+        setWorkflowState('ERROR');
+        setMessages(prev => [...prev, { role: 'system', content: `Error: ${msg}` }]);
+        eventSource.close();
+    });
   };
 
   return (
@@ -178,6 +172,11 @@ function App() {
             dbInfo={dbInfo}
             databases={databases}
             onDatabaseSwitch={handleDatabaseSwitch}
+            activeTable={activeTable}
+            onTableSelect={(t) => {
+              setActiveTable(t);
+              fetchSuggestions(askedQuestions, t);
+            }}
           />
         </section>
         <section className="panel workflow-panel-container">

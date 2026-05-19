@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './panels.css';
 
-function TableStatItem({ table }) {
+function TableStatItem({ table, isActive, onSelect }) {
   const [stats, setStats] = useState(null);
 
   useEffect(() => {
@@ -12,7 +12,7 @@ function TableStatItem({ table }) {
   }, [table.tableName]);
 
   return (
-    <li className="table-item">
+    <li className={`table-item ${isActive ? 'active' : ''}`} onClick={() => onSelect(isActive ? null : table.tableName)} style={{ cursor: 'pointer' }}>
       <strong>{table.tableName}</strong>
       {!stats ? (
         <div className="table-stats">
@@ -29,7 +29,7 @@ function TableStatItem({ table }) {
   );
 }
 
-export default function ChatPanel({ messages, onSubmit, onFileUpload, isProcessing, dbInfo, databases, onDatabaseSwitch }) {
+export default function ChatPanel({ messages, onSubmit, onFileUpload, isProcessing, dbInfo, databases, onDatabaseSwitch, activeTable, onTableSelect }) {
   const [input, setInput] = useState('');
   const endOfMessagesRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -76,7 +76,12 @@ export default function ChatPanel({ messages, onSubmit, onFileUpload, isProcessi
           {dbInfo && dbInfo.tables && dbInfo.tables.length > 0 ? (
             <ul className="table-list">
               {dbInfo.tables.map(table => (
-                <TableStatItem key={table.tableName} table={table} />
+                <TableStatItem 
+                  key={table.tableName} 
+                  table={table} 
+                  isActive={activeTable === table.tableName}
+                  onSelect={onTableSelect}
+                />
               ))}
             </ul>
           ) : (

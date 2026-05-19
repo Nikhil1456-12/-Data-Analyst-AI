@@ -93,8 +93,8 @@ app.post('/api/database/switch', async (req, res) => {
 
 app.post('/api/suggestions', async (req, res) => {
   try {
-    const { history } = req.body;
-    const suggestions = await generateSuggestions(history || []);
+    const { history, activeTable } = req.body;
+    const suggestions = await generateSuggestions(history || [], activeTable);
     res.json({ suggestions });
   } catch (error) {
     console.error(error);
@@ -102,49 +102,78 @@ app.post('/api/suggestions', async (req, res) => {
   }
 });
 
-app.post('/api/query', async (req, res) => {
-  const { query } = req.body;
+app.get('/api/query/stream', async (req, res) => {
+  const { query, activeTable } = req.query;
   if (!query) {
     return res.status(400).json({ error: 'Query is required' });
   }
 
+  // Set up SSE
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive'
+  });
+
+  const sendEvent = (type, data) => {
+    res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
   try {
-    const cacheKey = query.trim().toLowerCase();
+    const cacheKey = `${query.trim().toLowerCase()}_${activeTable || 'none'}`;
     if (queryCache.has(cacheKey)) {
       console.log('Cache hit for query:', cacheKey);
-      return res.json(queryCache.get(cacheKey));
+      sendEvent('state', 'DONE');
+      sendEvent('result', queryCache.get(cacheKey));
+      return res.end();
     }
 
+    sendEvent('state', 'PARSING');
     // 1. Convert NL to SQL
-    const sqlQuery = await processNLQuery(query);
+    const sqlQuery = await processNLQuery(query, activeTable);
     
+    sendEvent('state', 'VALIDATING');
+    // 1.5 Validate SQL (Ensure SELECT only)
+    const normalizedSql = sqlQuery.trim().toUpperCase();
+    if (!normalizedSql.startsWith('SELECT')) {
+      sendEvent('error', 'Security Exception: Only SELECT queries are permitted by the current workflow rules.');
+      return res.end();
+    }
+
+    sendEvent('state', 'EXECUTING');
     // 2. Execute SQL
     const dbResult = await executeQuery(sqlQuery);
 
-    // Handle non-SELECT queries (CREATE, UPDATE, INSERT, DROP)
     if (!Array.isArray(dbResult)) {
-      return res.json({
-        sql: sqlQuery,
-        data: [],
-        insights: `Operation successful. ${dbResult.affectedRows !== undefined ? 'Affected rows: ' + dbResult.affectedRows : 'Database structure modified.'}`,
-        chartImage: null
-      });
+        sendEvent('error', 'Unexpected Database Response. Expected an array of rows from a SELECT query.');
+        return res.end();
     }
 
     if (dbResult.length === 0) {
-      return res.json({
+      sendEvent('state', 'DONE');
+      sendEvent('result', {
         sql: sqlQuery,
         data: [],
         insights: 'Query executed successfully, but returned no data.',
         chartImage: null
       });
+      return res.end();
     }
     
+    sendEvent('state', 'INSIGHTS');
     // 3. Generate Insights & Chart config
-    const [insights, pythonCode] = await Promise.all([
-      generateInsights(query, dbResult),
-      generatePythonVizCode(query, dbResult)
-    ]);
+    const insights = await generateInsights(query, dbResult);
+    
+    sendEvent('state', 'CHART');
+    let pythonCode = null;
+    let vizSkipped = null;
+
+    // Only generate visualizations if we have 2 or more variables (columns) to plot!
+    if (Object.keys(dbResult[0]).length >= 2) {
+       pythonCode = await generatePythonVizCode(query, dbResult);
+    } else {
+       vizSkipped = "Visualization skipped: Query returned only 1 variable. Visualizations require 2 or more variables.";
+    }
 
     // 4. Generate Python Chart (Base64 Image)
     let chartImage = null;
@@ -160,17 +189,21 @@ app.post('/api/query', async (req, res) => {
       sql: sqlQuery,
       data: dbResult,
       insights,
-      chartImage
+      chartImage,
+      vizSkipped
     };
 
     // Cache the result for subsequent identical queries
     queryCache.set(cacheKey, resultPayload);
 
-    res.json(resultPayload);
+    sendEvent('state', 'DONE');
+    sendEvent('result', resultPayload);
+    res.end();
 
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: error.message || 'An error occurred during query processing.' });
+    sendEvent('error', error.message || 'An error occurred during query processing.');
+    res.end();
   }
 });
 

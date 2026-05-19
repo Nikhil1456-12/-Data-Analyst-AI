@@ -15,11 +15,13 @@ let dbConfig = {
   queueLimit: 0
 };
 
-function sanitizeName(name, maxLen = 63) {
-  let san = name.replace(/[^a-zA-Z0-9]/g, '_');
+function sanitizeName(name, maxLen = 50) {
+  if (!name) return 'col';
+  let san = String(name).trim().replace(/[^a-zA-Z0-9]/g, '_');
   san = san.replace(/_+/g, '_');
-  if (san.length > maxLen) san = san.slice(0, maxLen);
   if (/^[0-9]/.test(san)) san = 'col_' + san;
+  if (san.length > maxLen) san = san.slice(0, maxLen);
+  san = san.replace(/_$/, ''); // strip trailing underscore
   return san || 'col';
 }
 
