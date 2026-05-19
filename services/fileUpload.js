@@ -1,6 +1,6 @@
 import fs from 'fs';
 import csv from 'csv-parser';
-import * as xlsx from 'xlsx';
+import xlsx from 'xlsx';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
