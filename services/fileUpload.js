@@ -1,7 +1,9 @@
 import fs from 'fs';
 import csv from 'csv-parser';
 import * as xlsx from 'xlsx';
+import pdfParse from 'pdf-parse';
 import { executeQuery } from './db.js';
+import { parsePDFTableToJSON } from './llm.js';
 
 function sanitizeName(name, maxLen = 50) {
   if (!name) return 'col';
@@ -44,8 +46,10 @@ export async function processAndImportFile(filePath, originalFilename) {
     let headers = [];
     let rows = [];
 
-    const isExcel = filePath.endsWith('.xlsx') || filePath.endsWith('.xls');
-    const isJson = filePath.endsWith('.json');
+    const isExcel = originalFilename.toLowerCase().endsWith('.xlsx') || originalFilename.toLowerCase().endsWith('.xls');
+    const isJson = originalFilename.toLowerCase().endsWith('.json');
+    const isPdf = originalFilename.toLowerCase().endsWith('.pdf');
+    const isCsv = originalFilename.toLowerCase().endsWith('.csv') || originalFilename.toLowerCase().endsWith('.txt') || originalFilename.toLowerCase().endsWith('.tsv');
 
     if (isExcel) {
       try {
@@ -101,7 +105,43 @@ export async function processAndImportFile(filePath, originalFilename) {
       } catch (err) {
         reject(err);
       }
-    } else {
+    } else if (isPdf) {
+      try {
+        const dataBuffer = fs.readFileSync(filePath);
+        const pdfData = await pdfParse(dataBuffer);
+        const rawText = pdfData.text;
+
+        const dataArr = await parsePDFTableToJSON(rawText);
+        if (!Array.isArray(dataArr) || dataArr.length === 0) {
+           return resolve({ tableName, rowsCount: 0 });
+        }
+
+        const keySet = new Set();
+        dataArr.forEach(obj => {
+           if (obj && typeof obj === 'object') {
+               Object.keys(obj).forEach(k => keySet.add(k));
+           }
+        });
+        const originalHeaders = Array.from(keySet);
+        if (originalHeaders.length === 0) return resolve({ tableName, rowsCount: 0 });
+
+        headers = originalHeaders.map(h => sanitizeName(h));
+        
+        rows = dataArr.map(r => {
+          const out = {};
+          headers.forEach((h, idx) => {
+            const origKey = originalHeaders[idx];
+            let val = r[origKey];
+            if (val !== null && typeof val === 'object') val = JSON.stringify(val);
+            out[h] = val ?? null;
+          });
+          return out;
+        });
+        importData(tableName, headers, rows).then(resolve).catch(reject);
+      } catch (err) {
+        reject(err);
+      }
+    } else if (isCsv) {
       // Assume CSV or TXT
       fs.createReadStream(filePath)
         .pipe(csv())
@@ -123,6 +163,8 @@ export async function processAndImportFile(filePath, originalFilename) {
           importData(tableName, headers, rows).then(resolve).catch(reject);
         })
         .on('error', reject);
+    } else {
+      reject(new Error(`Unsupported file type: ${originalFilename}. The AI Data Analyst only extracts tables from .csv, .xlsx, .xls, .json, and .pdf files.`));
     }
   });
 }

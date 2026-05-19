@@ -5,7 +5,7 @@ import { getDatabaseSchema } from './db.js';
 dotenv.config();
 
 const openai = new OpenAI({
-  apiKey: process.env.GROQ_API_KEY,
+  apiKey: process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY || 'missing_api_key',
   baseURL: 'https://api.groq.com/openai/v1',
 });
 
@@ -157,6 +157,49 @@ Output must be a plain JSON array of strings ONLY. Example:
     return JSON.parse(rawList.trim());
   } catch(e) {
     console.error("Suggestions generator error:", e);
+    return [];
+  }
+}
+
+export async function parsePDFTableToJSON(rawText) {
+  if (!rawText) return [];
+  // Truncate to avoid context limit issues
+  if (rawText.length > 30000) {
+      rawText = rawText.slice(0, 30000) + "... (truncated)";
+  }
+
+  const prompt = `You are an expert Data Engineer. I have extracted raw text from a PDF document that contains tabular data.
+Because of the extraction process, the rows and columns might be messy, misaligned, or combined.
+
+Your task is to analyze the text, identify the underlying table structure, and reconstruct it into a perfectly formatted JSON array of objects.
+
+CRITICAL RULES:
+1. Return ONLY a valid JSON array of objects. Do NOT wrap it in markdown block quotes or include any explanatory text.
+2. The keys of each object should represent the column headers (use snake_case for keys).
+3. Every object in the array MUST have the exact same keys.
+4. If there are multiple tables, merge them or pick the most prominent data table.
+5. If no table data can be found, return an empty array [].
+
+Extracted PDF Text:
+${rawText}
+`;
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0,
+    });
+
+    let rawList = response.choices[0].message.content.trim();
+    if (rawList.startsWith('\`\`\`json')) rawList = rawList.slice(7);
+    if (rawList.startsWith('\`\`\`')) rawList = rawList.slice(3);
+    if (rawList.endsWith('\`\`\`')) rawList = rawList.slice(0, -3);
+    
+    const parsed = JSON.parse(rawList.trim());
+    return Array.isArray(parsed) ? parsed : [];
+  } catch(e) {
+    console.error("PDF Table to JSON error:", e);
     return [];
   }
 }

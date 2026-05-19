@@ -112,7 +112,6 @@ export default function ChatPanel({ messages, onSubmit, onFileUpload, isProcessi
       <form className="chat-input-form" onSubmit={handleSubmit}>
         <input 
           type="file" 
-          accept=".csv, .xlsx, .xls"
           multiple
           style={{ display: 'none' }}
           ref={fileInputRef}
