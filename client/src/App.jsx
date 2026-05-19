@@ -20,7 +20,7 @@ function App() {
 
   const fetchDatabases = async () => {
     try {
-      const response = await fetch('/api/databases');
+      const response = await fetch(`/api/databases?t=${Date.now()}`);
       const data = await response.json();
       if (data.databases) setDatabases(data.databases);
     } catch (err) {
@@ -30,7 +30,7 @@ function App() {
 
   const fetchSuggestions = async (historyObj = askedQuestions, tableContext = activeTable) => {
     try {
-      const response = await fetch('/api/suggestions', {
+      const response = await fetch(`/api/suggestions?t=${Date.now()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ history: historyObj, activeTable: tableContext })
@@ -44,7 +44,7 @@ function App() {
 
   const fetchDbInfo = async () => {
     try {
-      const response = await fetch('/api/database/info');
+      const response = await fetch(`/api/database/info?t=${Date.now()}`);
       const data = await response.json();
       setDbInfo(data);
     } catch (err) {
