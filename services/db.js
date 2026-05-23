@@ -15,7 +15,7 @@ let dbConfig = {
   queueLimit: 0
 };
 
-function sanitizeName(name, maxLen = 50) {
+function sanitizeName(name, maxLen = 64) {
   if (!name) return 'col';
   let san = String(name).trim().replace(/[^a-zA-Z0-9]/g, '_');
   san = san.replace(/_+/g, '_');

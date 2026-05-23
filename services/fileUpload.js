@@ -7,7 +7,7 @@ const pdfParse = require('pdf-parse');
 import { executeQuery } from './db.js';
 import { parsePDFTableToJSON } from './llm.js';
 
-function sanitizeName(name, maxLen = 50) {
+function sanitizeName(name, maxLen = 64) {
   if (!name) return 'col';
   let san = String(name).trim().replace(/[^a-zA-Z0-9]/g, '_');
   san = san.replace(/_+/g, '_');

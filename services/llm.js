@@ -24,6 +24,7 @@ CRITICAL RULES:
 2. If the user asks to remove, delete, or drop things: Generate the accurate \`DELETE\` or \`DROP TABLE\` query.
 3. If they ask to remove "duplicates", construct a query that deletes duplicate rows while keeping the original. Use the auto-generated \`__internal_id\` column as the tie-breaker for deleting duplicates.
 4. If they ask to remove "nulls", construct a \`DELETE\` query checking all relevant columns for \`IS NULL\`.
+5. MySQL does NOT support PERCENTILE_CONT, PERCENTILE_DISC, MEDIAN(), or WITHIN GROUP (ORDER BY ...) syntax! If a median or percentile is requested, write a clean subquery or calculate the average (AVG) instead. Never output WITHIN GROUP or window percentile functions.
 
 User Request: ${nlQuery}`;
 
