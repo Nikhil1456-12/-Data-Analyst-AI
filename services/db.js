@@ -139,36 +139,57 @@ export async function ensureHistoryTable() {
         \`executed_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
+    
+    // Self-healing migration: Add table_name column if it doesn't exist
+    const [columns] = await pool.execute(`SHOW COLUMNS FROM \`__internal_history\` LIKE 'table_name'`);
+    if (columns.length === 0) {
+      await pool.execute(`ALTER TABLE \`__internal_history\` ADD COLUMN \`table_name\` VARCHAR(100) DEFAULT NULL`);
+      console.log('Successfully added table_name column migration to __internal_history.');
+    }
     console.log('History table verified/created successfully.');
   } catch (error) {
     console.error('Error ensuring history table:', error);
   }
 }
 
-export async function saveHistoryRecordEntry(nlQuery, sqlQuery, status, rowCount, errorMessage) {
+export async function saveHistoryRecordEntry(nlQuery, sqlQuery, status, rowCount, errorMessage, tableName = null) {
   try {
     await pool.execute(
-      `INSERT INTO \`__internal_history\` (nl_query, sql_query, status, row_count, error_message) VALUES (?, ?, ?, ?, ?)`,
-      [nlQuery, sqlQuery || null, status, rowCount || 0, errorMessage || null]
+      `INSERT INTO \`__internal_history\` (nl_query, sql_query, status, row_count, error_message, table_name) VALUES (?, ?, ?, ?, ?, ?)`,
+      [nlQuery, sqlQuery || null, status, rowCount || 0, errorMessage || null, tableName || null]
     );
   } catch (error) {
     console.error('Failed to save history entry:', error);
   }
 }
 
-export async function getHistoryRecords() {
+export async function getHistoryRecords(tableName = null) {
   try {
-    const [rows] = await pool.execute(`SELECT * FROM \`__internal_history\` ORDER BY executed_at DESC LIMIT 100`);
-    return rows;
+    if (tableName) {
+      const [rows] = await pool.execute(
+        `SELECT * FROM \`__internal_history\` WHERE table_name = ? ORDER BY executed_at DESC LIMIT 100`,
+        [tableName]
+      );
+      return rows;
+    } else {
+      const [rows] = await pool.execute(
+        `SELECT * FROM \`__internal_history\` WHERE table_name IS NULL ORDER BY executed_at DESC LIMIT 100`
+      );
+      return rows;
+    }
   } catch (error) {
     console.error('Error fetching history:', error);
     return [];
   }
 }
 
-export async function clearHistoryRecords() {
+export async function clearHistoryRecords(tableName = null) {
   try {
-    await pool.execute(`TRUNCATE TABLE \`__internal_history\``);
+    if (tableName) {
+      await pool.execute(`DELETE FROM \`__internal_history\` WHERE table_name = ?`, [tableName]);
+    } else {
+      await pool.execute(`DELETE FROM \`__internal_history\` WHERE table_name IS NULL`);
+    }
     return true;
   } catch (error) {
     console.error('Error clearing history:', error);

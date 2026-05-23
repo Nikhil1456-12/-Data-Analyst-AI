@@ -45,9 +45,12 @@ function App() {
     }
   };
 
-  const fetchHistory = async () => {
+  const fetchHistory = async (tableContext = activeTable) => {
     try {
-      const response = await fetch(`/api/history?t=${Date.now()}`);
+      const url = tableContext
+        ? `/api/history?activeTable=${tableContext}&t=${Date.now()}`
+        : `/api/history?t=${Date.now()}`;
+      const response = await fetch(url);
       const data = await response.json();
       if (data.history) setHistoryLogs(data.history);
     } catch (err) {
@@ -56,9 +59,14 @@ function App() {
   };
 
   const clearHistory = async () => {
-    if (!confirm('Are you sure you want to clear the entire history for this database?')) return;
+    const scopeText = activeTable ? `for table "${activeTable}"` : 'for the database (general)';
+    if (!confirm(`Are you sure you want to clear the history ${scopeText}?`)) return;
     try {
-      await fetch('/api/history', { method: 'DELETE' });
+      await fetch('/api/history', { 
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activeTable })
+      });
       setHistoryLogs([]);
     } catch (err) {
       console.error('Failed to clear history', err);
@@ -213,6 +221,7 @@ function App() {
             onTableSelect={(t) => {
               setActiveTable(t);
               fetchSuggestions(askedQuestions, t);
+              fetchHistory(t);
             }}
           />
         </section>
@@ -228,6 +237,7 @@ function App() {
         isOpen={isHistoryOpen} 
         onClose={() => setIsHistoryOpen(false)} 
         history={historyLogs} 
+        activeTable={activeTable}
         onClearAll={clearHistory} 
         onReRun={handleQuerySubmit}
       />

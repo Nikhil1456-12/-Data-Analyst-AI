@@ -104,7 +104,8 @@ app.post('/api/suggestions', async (req, res) => {
 
 app.get('/api/history', async (req, res) => {
   try {
-    const history = await getHistoryRecords();
+    const { activeTable } = req.query;
+    const history = await getHistoryRecords(activeTable || null);
     res.json({ history });
   } catch (error) {
     console.error(error);
@@ -114,7 +115,8 @@ app.get('/api/history', async (req, res) => {
 
 app.delete('/api/history', async (req, res) => {
   try {
-    await clearHistoryRecords();
+    const activeTable = req.body.activeTable || req.query.activeTable;
+    await clearHistoryRecords(activeTable || null);
     res.json({ success: true, message: 'Query history cleared successfully.' });
   } catch (error) {
     console.error(error);
@@ -158,7 +160,7 @@ app.get('/api/query/stream', async (req, res) => {
     const normalizedSql = sqlQuery.trim().toUpperCase();
     if (!normalizedSql.startsWith('SELECT')) {
       sendEvent('error', 'Security Exception: Only SELECT queries are permitted by the current workflow rules.');
-      await saveHistoryRecordEntry(query, sqlQuery, 'error', 0, 'Security Exception: Only SELECT queries are permitted.');
+      await saveHistoryRecordEntry(query, sqlQuery, 'error', 0, 'Security Exception: Only SELECT queries are permitted.', activeTable || null);
       return res.end();
     }
 
@@ -219,7 +221,7 @@ app.get('/api/query/stream', async (req, res) => {
     queryCache.set(cacheKey, resultPayload);
 
     // Save successful history entry
-    await saveHistoryRecordEntry(query, sqlQuery, 'success', dbResult.length, null);
+    await saveHistoryRecordEntry(query, sqlQuery, 'success', dbResult.length, null, activeTable || null);
 
     sendEvent('state', 'DONE');
     sendEvent('result', resultPayload);
@@ -227,7 +229,7 @@ app.get('/api/query/stream', async (req, res) => {
 
   } catch (error) {
     console.error(error);
-    await saveHistoryRecordEntry(query, sqlQuery, 'error', 0, error.message || 'An error occurred during query processing.');
+    await saveHistoryRecordEntry(query, sqlQuery, 'error', 0, error.message || 'An error occurred during query processing.', activeTable || null);
     sendEvent('error', error.message || 'An error occurred during query processing.');
     res.end();
   }
