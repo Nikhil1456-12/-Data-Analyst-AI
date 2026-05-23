@@ -55,23 +55,37 @@ export async function processAndImportFile(filePath, originalFilename) {
 
     if (isExcel) {
       try {
-        const workbook = xlsx.readFile(filePath);
+        const fileBuffer = fs.readFileSync(filePath);
+        const workbook = xlsx.read(fileBuffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
         const ws = workbook.Sheets[sheetName];
         if (!ws['!ref']) {
           return resolve({ tableName, rowsCount: 0 });
         }
-        rows = xlsx.utils.sheet_to_json(ws);
-        if (rows.length === 0) return resolve({ tableName, rowsCount: 0 });
-        headers = Object.keys(rows[0]).map(h => sanitizeName(h));
-        rows = rows.map(r => {
+        
+        // Parse sheet as raw array of arrays to preserve exact index order and column counts
+        const sheetData = xlsx.utils.sheet_to_json(ws, { header: 1 });
+        if (sheetData.length === 0) return resolve({ tableName, rowsCount: 0 });
+        
+        const rawHeaders = sheetData[0];
+        // Clean and sanitize headers, replacing empty ones with defaults
+        headers = rawHeaders.map((h, i) => sanitizeName(h || `col_${i + 1}`));
+        
+        // Map rows dynamically by absolute array index to prevent shifting
+        rows = [];
+        for (let i = 1; i < sheetData.length; i++) {
+          const rowData = sheetData[i];
+          if (!rowData || rowData.length === 0) continue;
+          
           const out = {};
           headers.forEach((h, idx) => {
-            const origKey = Object.keys(r)[idx];
-            out[h] = r[origKey] ?? null;
+            const val = rowData[idx];
+            out[h] = val !== undefined && val !== null ? String(val).trim() : null;
           });
-          return out;
-        });
+          rows.push(out);
+        }
+        
+        if (rows.length === 0) return resolve({ tableName, rowsCount: 0 });
         importData(tableName, headers, rows).then(resolve).catch(reject);
       } catch (err) {
         reject(err);
