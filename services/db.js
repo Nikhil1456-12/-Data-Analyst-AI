@@ -67,7 +67,7 @@ export async function getDatabaseSchema() {
         const tableName = Object.values(tables[i])[0];
         if (tableName === '__internal_history') continue;
         const [columns] = await pool.execute(`DESCRIBE \`${tableName}\``);
-        const colNames = columns.map(c => sanitizeName(c.Field)).join(', ');
+        const colNames = columns.map(c => c.Field).join(', ');
         schemaStr += `Table: ${tableName} | Columns: ${colNames}\n`;
     }
     
@@ -99,7 +99,7 @@ export async function getTableStats(tableName) {
     // Defensive truncation
     if (tableName.length > 63) tableName = tableName.slice(0, 63);
     const [cols] = await pool.execute(`DESCRIBE \`${tableName}\``);
-    const validCols = cols.filter(c => c.Field !== '_id' && c.Field !== 'id').map(c => `\`${sanitizeName(c.Field)}\``);
+    const validCols = cols.filter(c => c.Field !== '_id' && c.Field !== 'id').map(c => `\`${c.Field}\``);
     
     let totalNulls = 0;
     let totalDuplicates = 0;
