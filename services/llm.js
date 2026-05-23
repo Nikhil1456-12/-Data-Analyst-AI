@@ -119,7 +119,14 @@ except Exception as e:
 
 export async function generateSuggestions(history = [], activeTable = null) {
   let schema = await getDatabaseSchema();
-  if (!schema || schema.length < 5) return [];
+  if (!schema || schema.length < 5) {
+    return [
+      "How do I perform a Cohort Analysis or calculate Customer Retention Rate?",
+      "Analyze the distribution of sales/transactions to identify outliers using SQL.",
+      "Generate a Month-over-Month (MoM) growth rate report for key business metrics.",
+      "How do I run a Pareto (80/20 rule) analysis to find my top products or customers?"
+    ];
+  }
 
   if (activeTable) {
       schema = `FOCUS EXCLUSIVELY ON THIS TABLE:\n` + schema.split('\n').filter(l => l.includes(`Table: ${activeTable}`)).join('\n');
@@ -127,37 +134,61 @@ export async function generateSuggestions(history = [], activeTable = null) {
 
   const historyStr = history.length > 0 ? `DO NOT SUGGEST ANY OF THESE PREVIOUS QUERIES:\n- ${history.join('\n- ')}` : '';
 
-  const prompt = `You are an expert AI Data Analyst. Analyze the exact database schema below and provide exactly 4 highly-specific, pinpoint questions the user could ask to get powerful business insights.
+  const prompt = `You are a Senior AI Data Scientist and expert Data Analyst.
+Analyze the exact database schema below and provide exactly 4 highly-specific, sophisticated, and analytical questions that a professional data analyst or data science worker would ask to get deep, actionable business insights or perform advanced data analysis on this dataset.
 
 Schema context:
 ${schema}
 
 ${historyStr}
 
-CRITICAL RULES:
-- The questions MUST be perfectly solvable using ONLY the exact tables and columns provided. 
-- Use specific column names in your questions if it adds clarity.
-- Ensure the agent can actually convert these into valid SQL.
-- Provide exactly 4 distinct natural language questions.
+CRITICAL RULES FOR GENERATION:
+1. The questions MUST be perfectly solvable using ONLY the exact tables and columns provided in the schema context.
+2. The questions must be geared towards professional data analysis and data science. They should include combinations of the following analytical patterns:
+   - Trend & Time-Series Analysis (e.g., month-over-month growth, weekly trends, seasonal patterns, peak times/dates).
+   - Cohort & Retention Analysis (e.g., tracking customer groups over time, calculating retention rates).
+   - Anomaly & Outlier Detection (e.g., identifying transactions/records that deviate significantly from the average, finding extreme values).
+   - Segment & Pareto (80/20) Analysis (e.g., identifying the top 20% of segments contributing to 80% of metrics, profiling customer segments).
+   - Statistical & Distribution Insights (e.g., finding the average, median, distribution range, or frequency of specific behaviors).
+   - Data Quality & Cleaning (e.g., identifying high null-rate columns, analyzing duplicate distributions).
+3. Do NOT suggest basic or trivial queries like "Select all columns from table" or "List all rows".
+4. Refer to specific table and column names from the schema to make the questions highly relevant and immediately executable.
+5. Provide exactly 4 distinct, highly professional, and natural language questions.
 
-Output must be a plain JSON array of strings ONLY. Example:
-["What is the average transaction_amount per month in the sales table?", "Which customer_id has the highest order_count?"]`;
+Output must be a plain JSON array of strings ONLY. Do not include any explanations, markdown blockquotes, or extra text.
+Example format:
+[
+  "What is the Month-over-Month growth rate of sales in the transactions table?",
+  "Identify any transactions where the amount is 3 standard deviations above the average in the payments table.",
+  "Which 20% of customer segments generate 80% of total revenue in the orders table?",
+  "What is the distribution of active days for users grouped by registration cohort?"
+]`;
 
   try {
     const response = await openai.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.8, // higher temp for variation
+      temperature: 0.75,
     });
 
     let rawList = response.choices[0].message.content.trim();
-    if (rawList.startsWith('```json')) rawList = rawList.slice(7);
-    if (rawList.endsWith('```')) rawList = rawList.slice(0, -3);
+    // Strip markdown formatting if any
+    rawList = rawList.replace(/^```(json)?\s*/i, '').replace(/\s*```$/, '').trim();
     
-    return JSON.parse(rawList.trim());
+    const parsed = JSON.parse(rawList);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed.slice(0, 4);
+    }
+    throw new Error("Parsed content is not a non-empty array");
   } catch(e) {
     console.error("Suggestions generator error:", e);
-    return [];
+    const tablePart = activeTable ? `in \`${activeTable}\`` : 'in the active table';
+    return [
+      `Analyze the weekly trend of records ${tablePart}.`,
+      `Identify duplicate records or rows with high missing value counts ${tablePart}.`,
+      `Find the maximum, minimum, and average range distributions ${tablePart}.`,
+      `Analyze potential data quality anomalies or outliers ${tablePart}.`
+    ];
   }
 }
 

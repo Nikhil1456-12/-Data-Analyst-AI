@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { executeQuery, getDatabaseInfo, getTableStats, getDatabases, switchDatabase } from './services/db.js';
+import { executeQuery, getDatabaseInfo, getTableStats, getDatabases, switchDatabase, ensureHistoryTable, saveHistoryRecordEntry, getHistoryRecords, clearHistoryRecords } from './services/db.js';
 import { processNLQuery, generateInsights, generatePythonVizCode, generateSuggestions } from './services/llm.js';
 import { runPythonViz } from './services/pythonViz.js';
 import { processAndImportFile } from './services/fileUpload.js';
@@ -102,6 +102,26 @@ app.post('/api/suggestions', async (req, res) => {
   }
 });
 
+app.get('/api/history', async (req, res) => {
+  try {
+    const history = await getHistoryRecords();
+    res.json({ history });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to retrieve query history.' });
+  }
+});
+
+app.delete('/api/history', async (req, res) => {
+  try {
+    await clearHistoryRecords();
+    res.json({ success: true, message: 'Query history cleared successfully.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to clear query history.' });
+  }
+});
+
 app.get('/api/query/stream', async (req, res) => {
   const { query, activeTable } = req.query;
   if (!query) {
@@ -119,6 +139,7 @@ app.get('/api/query/stream', async (req, res) => {
     res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
+  let sqlQuery = null;
   try {
     const cacheKey = `${query.trim().toLowerCase()}_${activeTable || 'none'}`;
     if (queryCache.has(cacheKey)) {
@@ -130,13 +151,14 @@ app.get('/api/query/stream', async (req, res) => {
 
     sendEvent('state', 'PARSING');
     // 1. Convert NL to SQL
-    const sqlQuery = await processNLQuery(query, activeTable);
+    sqlQuery = await processNLQuery(query, activeTable);
     
     sendEvent('state', 'VALIDATING');
     // 1.5 Validate SQL (Ensure SELECT only)
     const normalizedSql = sqlQuery.trim().toUpperCase();
     if (!normalizedSql.startsWith('SELECT')) {
       sendEvent('error', 'Security Exception: Only SELECT queries are permitted by the current workflow rules.');
+      await saveHistoryRecordEntry(query, sqlQuery, 'error', 0, 'Security Exception: Only SELECT queries are permitted.');
       return res.end();
     }
 
@@ -196,12 +218,16 @@ app.get('/api/query/stream', async (req, res) => {
     // Cache the result for subsequent identical queries
     queryCache.set(cacheKey, resultPayload);
 
+    // Save successful history entry
+    await saveHistoryRecordEntry(query, sqlQuery, 'success', dbResult.length, null);
+
     sendEvent('state', 'DONE');
     sendEvent('result', resultPayload);
     res.end();
 
   } catch (error) {
     console.error(error);
+    await saveHistoryRecordEntry(query, sqlQuery, 'error', 0, error.message || 'An error occurred during query processing.');
     sendEvent('error', error.message || 'An error occurred during query processing.');
     res.end();
   }
@@ -219,6 +245,11 @@ app.get('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+  try {
+    await ensureHistoryTable();
+  } catch (err) {
+    console.error("Failed to initialize history table at startup:", err);
+  }
 });

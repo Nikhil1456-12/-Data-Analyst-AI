@@ -31,6 +31,7 @@ export async function switchDatabase(newDbName) {
   if (pool) await pool.end();
   dbConfig.database = newDbName;
   pool = mysql.createPool(dbConfig);
+  await ensureHistoryTable();
 }
 
 export async function getDatabases() {
@@ -64,6 +65,7 @@ export async function getDatabaseSchema() {
     
     for (let i = 0; i < tables.length; i++) {
         const tableName = Object.values(tables[i])[0];
+        if (tableName === '__internal_history') continue;
         const [columns] = await pool.execute(`DESCRIBE \`${tableName}\``);
         const colNames = columns.map(c => sanitizeName(c.Field)).join(', ');
         schemaStr += `Table: ${tableName} | Columns: ${colNames}\n`;
@@ -82,7 +84,9 @@ export async function getDatabaseInfo() {
     const activeDb = dbResult[0].activeDb || dbConfig.database;
 
     const [tablesList] = await pool.execute('SHOW TABLES');
-    const info = tablesList.map(row => ({ tableName: Object.values(row)[0] }));
+    const info = tablesList
+      .map(row => ({ tableName: Object.values(row)[0] }))
+      .filter(t => t.tableName !== '__internal_history');
     return { dbName: activeDb, tables: info };
   } catch (error) {
     console.error('Error fetching DB info:', error);
@@ -119,5 +123,55 @@ export async function getTableStats(tableName) {
   } catch (error) {
     console.error(`Error in stats for ${tableName}:`, error.message);
     return { rowCount: 'Error', totalNulls: 'Error', totalDuplicates: 'Error' };
+  }
+}
+
+export async function ensureHistoryTable() {
+  try {
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS \`__internal_history\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`nl_query\` TEXT NOT NULL,
+        \`sql_query\` TEXT,
+        \`status\` VARCHAR(20) NOT NULL,
+        \`row_count\` INT DEFAULT 0,
+        \`error_message\` TEXT,
+        \`executed_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+    console.log('History table verified/created successfully.');
+  } catch (error) {
+    console.error('Error ensuring history table:', error);
+  }
+}
+
+export async function saveHistoryRecordEntry(nlQuery, sqlQuery, status, rowCount, errorMessage) {
+  try {
+    await pool.execute(
+      `INSERT INTO \`__internal_history\` (nl_query, sql_query, status, row_count, error_message) VALUES (?, ?, ?, ?, ?)`,
+      [nlQuery, sqlQuery || null, status, rowCount || 0, errorMessage || null]
+    );
+  } catch (error) {
+    console.error('Failed to save history entry:', error);
+  }
+}
+
+export async function getHistoryRecords() {
+  try {
+    const [rows] = await pool.execute(`SELECT * FROM \`__internal_history\` ORDER BY executed_at DESC LIMIT 100`);
+    return rows;
+  } catch (error) {
+    console.error('Error fetching history:', error);
+    return [];
+  }
+}
+
+export async function clearHistoryRecords() {
+  try {
+    await pool.execute(`TRUNCATE TABLE \`__internal_history\``);
+    return true;
+  } catch (error) {
+    console.error('Error clearing history:', error);
+    throw error;
   }
 }

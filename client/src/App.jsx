@@ -3,6 +3,7 @@ import './index.css';
 import ChatPanel from './components/ChatPanel';
 import WorkflowPanel from './components/WorkflowPanel';
 import ResultsPanel from './components/ResultsPanel';
+import HistoryDrawer from './components/HistoryDrawer';
 
 function App() {
   const [query, setQuery] = useState('');
@@ -17,6 +18,8 @@ function App() {
   const [dbInfo, setDbInfo] = useState(null);
   const [databases, setDatabases] = useState([]);
   const [activeTable, setActiveTable] = useState(null);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [historyLogs, setHistoryLogs] = useState([]);
 
   const fetchDatabases = async () => {
     try {
@@ -42,6 +45,26 @@ function App() {
     }
   };
 
+  const fetchHistory = async () => {
+    try {
+      const response = await fetch(`/api/history?t=${Date.now()}`);
+      const data = await response.json();
+      if (data.history) setHistoryLogs(data.history);
+    } catch (err) {
+      console.error('Failed to load query history', err);
+    }
+  };
+
+  const clearHistory = async () => {
+    if (!confirm('Are you sure you want to clear the entire history for this database?')) return;
+    try {
+      await fetch('/api/history', { method: 'DELETE' });
+      setHistoryLogs([]);
+    } catch (err) {
+      console.error('Failed to clear history', err);
+    }
+  };
+
   const fetchDbInfo = async () => {
     try {
       const response = await fetch(`/api/database/info?t=${Date.now()}`);
@@ -56,6 +79,7 @@ function App() {
     fetchDatabases();
     fetchSuggestions([]);
     fetchDbInfo();
+    fetchHistory();
   }, []);
 
   const handleDatabaseSwitch = async (newDb) => {
@@ -68,6 +92,7 @@ function App() {
       fetchDbInfo();
       setActiveTable(null);
       fetchSuggestions([], null);
+      fetchHistory();
       setMessages(prev => [...prev, { role: 'system', content: `Environment switched securely to database: ${newDb}` }]);
     } catch (err) {
       console.error(err);
@@ -138,13 +163,13 @@ function App() {
         setMessages(prev => [...prev, { role: 'system', content: `Query executed successfully! Found ${data.data?.length || 0} rows.` }]);
         fetchDbInfo();
         fetchSuggestions(newAsked);
+        fetchHistory();
         eventSource.close();
     });
 
     eventSource.addEventListener('error', (e) => {
         let msg = 'An error occurred during query processing.';
         try {
-             // SSE sometimes sends raw strings or JSON
              msg = JSON.parse(e.data);
         } catch {
              msg = e.data || msg;
@@ -152,15 +177,27 @@ function App() {
         console.error("SSE Error:", msg);
         setWorkflowState('ERROR');
         setMessages(prev => [...prev, { role: 'system', content: `Error: ${msg}` }]);
+        fetchHistory();
         eventSource.close();
     });
   };
 
   return (
     <div className="app-container">
-      <header className="app-header">
-        <h1>AI Data Analyst</h1>
-        <span className="badge">Pro</span>
+      <header className="app-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <h1>AI Data Analyst</h1>
+          <span className="badge">Pro</span>
+        </div>
+        <button 
+          className="history-trigger-btn"
+          onClick={() => setIsHistoryOpen(true)}
+          title="View Query History"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 8v4l3 3M3 12a9 9 0 1 1 9 9m-9-9c.3-2.6 1.8-4.8 4-6" />
+          </svg>
+        </button>
       </header>
       <main className="three-panel-layout">
         <section className="panel chat-panel-container">
@@ -186,6 +223,14 @@ function App() {
           <ResultsPanel result={resultData} sqlHistory={sqlHistory} />
         </section>
       </main>
+
+      <HistoryDrawer 
+        isOpen={isHistoryOpen} 
+        onClose={() => setIsHistoryOpen(false)} 
+        history={historyLogs} 
+        onClearAll={clearHistory} 
+        onReRun={handleQuerySubmit}
+      />
     </div>
   );
 }
