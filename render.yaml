@@ -1,14 +1,12 @@
-# Render.com deployment configuration
 services:
   - type: web
-    name: data-analyst-ai
-    runtime: docker
-    dockerfilePath: ./Dockerfile
+    name: ai-data-analyst
+    env: docker
+    plan: free
+    branch: main
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: "3001"
       - key: GROQ_API_KEY
         sync: false
       - key: DB_HOST
@@ -20,16 +18,10 @@ services:
       - key: DB_PASSWORD
         sync: false
       - key: DB_NAME
-        value: data_analyst
+        sync: false
       - key: DB_SSL
         value: "true"
       - key: JWT_SECRET
-        generateValue: true
+        sync: false
       - key: AUTH_ENABLED
         value: "false"
-      - key: RATE_LIMIT_WINDOW_MS
-        value: "900000"
-      - key: RATE_LIMIT_MAX_REQUESTS
-        value: "100"
-    healthCheckPath: /api/health
-    autoDeploy: true

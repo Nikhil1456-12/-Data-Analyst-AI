@@ -1,64 +1,39 @@
-# ─── Data Analyst AI — Production Dockerfile ──────────────────────────────────
-FROM node:20-slim AS builder
-
-WORKDIR /app
-
-# Install Python for visualization & analytics
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python dependencies
-COPY requirements.txt .
-RUN python3 -m pip install --no-cache-dir --break-system-packages -r requirements.txt
-
-# Install Node dependencies
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
-
-# Build frontend
-COPY client/package.json client/package-lock.json* ./client/
-RUN cd client && npm ci
-COPY client/ ./client/
-RUN cd client && npm run build
-
-# ─── Production Stage ─────────────────────────────────────────────────────────
 FROM node:20-slim
 
 WORKDIR /app
 
+# Install Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
 
+# Python dependencies
 COPY requirements.txt .
-RUN python3 -m pip install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt 2>/dev/null || \
+    pip3 install --no-cache-dir -r requirements.txt
 
-# Copy production node_modules and built frontend
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/client/dist ./client/dist
+# Node backend dependencies
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
-# Copy application code
+# Frontend build
+COPY client/package.json client/package-lock.json ./client/
+RUN cd client && npm ci
+COPY client/ ./client/
+RUN cd client && npm run build && rm -rf node_modules
+
+# Application code
 COPY server.js .
 COPY services/ ./services/
 COPY routes/ ./routes/
 COPY middleware/ ./middleware/
-COPY package.json .
 
-# Create uploads directory
 RUN mkdir -p uploads
 
-# Security: run as non-root
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
-RUN chown -R appuser:appgroup /app
-USER appuser
-
 ENV NODE_ENV=production
-ENV PORT=3001
+ENV PORT=10000
 
-EXPOSE 3001
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://localhost:3001/api/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"
+EXPOSE 10000
 
 CMD ["node", "server.js"]
