@@ -15,11 +15,11 @@ RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt 2>/d
 
 # Backend dependencies
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 # Build frontend
 COPY client/package.json client/package-lock.json ./client/
-RUN cd client && npm ci
+RUN cd client && npm install
 COPY client/ ./client/
 RUN cd client && npm run build && rm -rf node_modules
 
