@@ -87,22 +87,22 @@ confidence_upper = []
 
 if method == 'holt_winters' or method == 'exponential_smoothing':
     try:
-        from statsmodels.tsa.holtwinters import ExponentialSmoothing
+        # Simple exponential smoothing implementation (no statsmodels needed)
+        alpha = 0.3
+        beta = 0.1
+        level = values[0]
+        trend = (values[-1] - values[0]) / len(values) if len(values) > 1 else 0
         
-        seasonal_periods = min(12, len(values) // 2)
-        if seasonal_periods < 2:
-            seasonal_periods = 2
+        fitted = []
+        for v in values:
+            last_level = level
+            level = alpha * v + (1 - alpha) * (level + trend)
+            trend = beta * (level - last_level) + (1 - beta) * trend
+            fitted.append(level + trend)
         
-        if method == 'holt_winters' and len(values) >= seasonal_periods * 2:
-            model = ExponentialSmoothing(values, trend='add', seasonal='add', seasonal_periods=seasonal_periods)
-        else:
-            model = ExponentialSmoothing(values, trend='add', seasonal=None)
+        forecast_values = [level + trend * (i + 1) for i in range(periods)]
         
-        fit = model.fit(optimized=True)
-        forecast_values = fit.forecast(periods).tolist()
-        
-        # Confidence intervals (approximate using residual std)
-        residuals = values - fit.fittedvalues
+        residuals = values - np.array(fitted)
         std_resid = float(np.std(residuals))
         confidence_lower = [v - 1.96 * std_resid for v in forecast_values]
         confidence_upper = [v + 1.96 * std_resid for v in forecast_values]
@@ -211,8 +211,6 @@ import sys
 import json
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler
 
 with open(sys.argv[1], 'r') as f:
     params = json.load(f)
@@ -227,32 +225,26 @@ df = df.dropna(subset=[target] + features)
 if len(df) < 10:
     print(json.dumps({"error": "Insufficient data (need at least 10 complete rows)"}))
 else:
-    X = df[features].astype(float).values
     y = df[target].astype(float).values
     
-    # Standardize
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Random Forest for feature importance
-    rf = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=10)
-    rf.fit(X_scaled, y)
-    
-    importances = rf.feature_importances_
-    sorted_idx = np.argsort(importances)[::-1]
-    
+    # Correlation-based feature importance (no sklearn needed)
     feature_ranking = []
-    for idx in sorted_idx:
+    for feat in features:
+        x = df[feat].astype(float).values
+        # Pearson correlation as importance proxy
+        corr = np.corrcoef(x, y)[0, 1] if np.std(x) > 0 else 0
         feature_ranking.append({
-            "feature": features[idx],
-            "importance": round(float(importances[idx]), 4),
-            "percentage": round(float(importances[idx] * 100), 1)
+            "feature": feat,
+            "importance": round(abs(float(corr)), 4),
+            "correlation": round(float(corr), 4),
+            "percentage": round(abs(float(corr)) * 100, 1)
         })
     
+    feature_ranking.sort(key=lambda x: x["importance"], reverse=True)
+    
     result = {
-        "method": "Random Forest Feature Importance",
+        "method": "Correlation-Based Feature Importance",
         "target": target,
-        "r2_score": round(float(rf.score(X_scaled, y)), 4),
         "n_samples": len(df),
         "features": feature_ranking
     }

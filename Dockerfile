@@ -2,13 +2,13 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# Install Python for analytics & visualization
+# Install Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python
 
-# Python dependencies
+# Python dependencies (lightweight — no sklearn/statsmodels)
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt 2>/dev/null || \
     pip3 install --no-cache-dir -r requirements.txt
@@ -33,5 +33,4 @@ RUN mkdir -p uploads
 
 ENV NODE_ENV=production
 
-# Railway sets PORT dynamically
 CMD ["node", "server.js"]
