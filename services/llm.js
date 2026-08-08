@@ -1,237 +1,320 @@
 import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
-import { getDatabaseSchema } from './db.js';
+import { getDatabaseSchema, detectRelationships } from './db.js';
 
 dotenv.config();
 
+// ─── LLM Client Setup ────────────────────────────────────────────────────────
+
 const openai = new OpenAI({
   apiKey: process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY || 'missing_api_key',
-  baseURL: 'https://api.groq.com/openai/v1',
+  baseURL: process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1',
 });
+
+const MODEL = process.env.LLM_MODEL || 'llama-3.3-70b-versatile';
+
+async function llmCall(messages, temperature = 0, maxTokens = 4096) {
+  const response = await openai.chat.completions.create({
+    model: MODEL,
+    messages,
+    temperature,
+    max_tokens: maxTokens
+  });
+  return response.choices[0].message.content.trim();
+}
+
+function stripMarkdown(text) {
+  return text.replace(/^```(sql|python|json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+}
+
+// ─── NL to SQL Conversion ────────────────────────────────────────────────────
 
 export async function processNLQuery(nlQuery, activeTable = null) {
   let schema = await getDatabaseSchema();
+  const relationships = await detectRelationships();
+
+  let context = schema;
   if (activeTable) {
-      schema = `FOCUS EXCLUSIVELY ON THIS TABLE:\n` + schema.split('\n').filter(l => l.includes(`Table: ${activeTable}`)).join('\n') + `\n\nFull Schema Context:\n${schema}`;
+    context = `PRIMARY FOCUS TABLE: ${activeTable}\n\n${schema}`;
+  }
+
+  let relationshipContext = '';
+  if (relationships.length > 0) {
+    relationshipContext = '\nDETECTED TABLE RELATIONSHIPS:\n' +
+      relationships.map(r => `  ${r.tableA}.${r.joinColumn} ↔ ${r.tableB}.${r.joinColumn} (confidence: ${r.confidence})`).join('\n');
   }
 
   const prompt = `You are an expert Data Analyst and MySQL developer.
-Given the user's natural language request, convert it to a valid MySQL query based on the following schema:
-${schema}
+Convert the user's natural language request into a valid MySQL query.
+
+DATABASE SCHEMA:
+${context}
+${relationshipContext}
 
 CRITICAL RULES:
-1. Return ONLY the raw SQL query, without any markdown formatting or explanations.
-2. If the user asks to remove, delete, or drop things: Generate the accurate \`DELETE\` or \`DROP TABLE\` query.
-3. If they ask to remove "duplicates", construct a query that deletes duplicate rows while keeping the original. Use the auto-generated \`__internal_id\` column as the tie-breaker for deleting duplicates.
-4. If they ask to remove "nulls", construct a \`DELETE\` query checking all relevant columns for \`IS NULL\`.
-5. MySQL does NOT support PERCENTILE_CONT, PERCENTILE_DISC, MEDIAN(), or WITHIN GROUP (ORDER BY ...) syntax! If a median or percentile is requested, write a clean subquery or calculate the average (AVG) instead. Never output WITHIN GROUP or window percentile functions.
+1. Return ONLY the raw SQL query — no markdown, no explanations, no comments.
+2. Use proper JOINs when the query requires data from multiple tables. Refer to the DETECTED TABLE RELATIONSHIPS above.
+3. For DELETE/DROP operations: generate accurate DELETE or DROP TABLE queries.
+4. For duplicate removal: use the \`__row_id\` column as the tie-breaker.
+5. For null removal: construct DELETE checking all relevant columns for IS NULL.
+6. MySQL does NOT support PERCENTILE_CONT, PERCENTILE_DISC, MEDIAN(), or WITHIN GROUP. Use subqueries or AVG instead.
+7. Always use backticks for table and column identifiers.
+8. For data cleaning requests (fill nulls, cast types, rename columns): generate appropriate UPDATE/ALTER statements.
+9. Limit results to 1000 rows unless the user explicitly asks for all.
 
 User Request: ${nlQuery}`;
 
-  const response = await openai.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0,
-  });
-
-  let sql = response.choices[0].message.content.trim();
-  // Remove markdown formatting if the model still adds it
-  sql = sql.replace(/^```sql\n/, '').replace(/```$/, '').trim();
+  let sql = await llmCall([{ role: 'user', content: prompt }], 0);
+  sql = stripMarkdown(sql);
   return sql;
 }
 
+// ─── Business Insights Generation ────────────────────────────────────────────
+
 export async function generateInsights(nlQuery, data) {
-    let dataStr = JSON.stringify(data);
-    // limit data context length to avoid huge token usage
-    if (dataStr.length > 5000) {
-        dataStr = dataStr.slice(0, 5000) + "... (truncated)";
-    }
+  let dataStr = JSON.stringify(data);
+  if (dataStr.length > 8000) {
+    dataStr = dataStr.slice(0, 8000) + '... (truncated)';
+  }
 
-    const prompt = `You are an expert Data Analyst. Produce 3-5 key business insights from the provided SQL query results.
-User Query: ${nlQuery}
-Data Results: ${dataStr}
+  const prompt = `You are a Senior Data Analyst at a Fortune 500 company. Analyze the query results and produce actionable business insights.
 
-Provide clear, bulleted insights identifying trends, totals, or anomalies. Be concise.`;
+User Query: "${nlQuery}"
+Data Results (${data.length} rows): ${dataStr}
 
-    const response = await openai.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.5,
-    });
-  
-    return response.choices[0].message.content.trim();
+Provide exactly 4-6 insights in this format:
+- Start each insight with an emoji indicator (📈 for growth, 📉 for decline, ⚠️ for warning, ✅ for positive, 🔍 for observation)
+- Each insight should be 1-2 sentences maximum
+- Focus on: trends, anomalies, business implications, and recommended actions
+- Be specific with numbers and percentages where possible
+
+Do NOT use markdown headers. Use plain bullet points only.`;
+
+  return await llmCall([{ role: 'user', content: prompt }], 0.3);
 }
+
+// ─── Python Visualization Code Generation ────────────────────────────────────
 
 export async function generatePythonVizCode(nlQuery, data) {
-    if (!data || data.length === 0) return null;
+  if (!data || data.length === 0) return null;
 
-    const keys = Object.keys(data[0]);
+  const keys = Object.keys(data[0]);
+  const sampleRow = data[0];
 
-    const prompt = `You are an expert Data Scientist and Python visualization expert. Write a Python script using pandas, matplotlib, and seaborn to create a professional, stunning chart based on the user's query.
+  const prompt = `You are an expert Data Visualization engineer. Write a Python script to create a professional, publication-quality chart.
+
 User Query: "${nlQuery}"
 Available Columns: ${JSON.stringify(keys)}
+Sample Row: ${JSON.stringify(sampleRow)}
+Total Rows: ${data.length}
 
-Requirements:
-- The data array will be passed in as a JSON string to sys.argv[1].
-- Use pandas to load this JSON data.
-- Analyze the Data and determine distinct X and Y axes appropriately. Use Time series formats for dates if applicable.
-- Make it extremely professional using seaborn styles (sns.set_theme(style="whitegrid")).
-- Use distinct, modern colors and highly legible rotated tick labels if needed. Add a professional Title.
-- DO NOT Use plt.show(). 
-- Save the plot to a BytesIO object and print the base64 encoded string of the image.
-- DO NOT print anything else except the final base64 string.
-- Return ONLY the raw Python code without any markdown tags.
+REQUIREMENTS:
+- Data is passed as JSON string via sys.argv[1]. Parse with json.loads(sys.argv[1]).
+- Use pandas, matplotlib, and seaborn.
+- Apply: sns.set_theme(style="darkgrid", palette="husl")
+- Use a modern color palette with plt.cm.Set2 or similar.
+- Figure size: (12, 7) with tight_layout.
+- Professional title, axis labels with proper formatting.
+- Rotate x-labels if needed for readability.
+- Add subtle gridlines and remove top/right spines.
+- DO NOT use plt.show().
+- Save to BytesIO, print base64 encoded PNG string only.
+- Wrap in try/except — on error print nothing.
+- Choose the BEST chart type based on data: bar, line, scatter, heatmap, pie, box, etc.
+- If dates detected, use time-series line chart.
 
-Example structure:
-import sys
-import json
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-import io
-import base64
+Return ONLY raw Python code — no markdown.`;
 
-try:
-    sns.set_theme(style="whitegrid")
-    data = json.loads(sys.argv[1])
-    df = pd.DataFrame(data)
-    
-    plt.figure(figsize=(10,6))
-    # ... smart dynamic plot logic using distinct X and Y based on data types ...
-    
-    img = io.BytesIO()
-    plt.savefig(img, format='png', bbox_inches='tight')
-    img.seek(0)
-    print(base64.b64encode(img.read()).decode('utf-8'))
-except Exception as e:
-    pass
-`;
-
-    const response = await openai.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0,
-    });
-
-    let pythonCode = response.choices[0].message.content.trim();
-    pythonCode = pythonCode.replace(/^```python\n/, '').replace(/```$/, '').trim();
-    return pythonCode;
+  let code = await llmCall([{ role: 'user', content: prompt }], 0);
+  code = stripMarkdown(code);
+  return code;
 }
+
+// ─── Smart Suggestions ───────────────────────────────────────────────────────
 
 export async function generateSuggestions(history = [], activeTable = null) {
   let schema = await getDatabaseSchema();
   if (!schema || schema.length < 5) {
     return [
+      "Upload a dataset to get started with AI-powered analysis",
       "How do I perform a Cohort Analysis or calculate Customer Retention Rate?",
-      "Analyze the distribution of sales/transactions to identify outliers using SQL.",
-      "Generate a Month-over-Month (MoM) growth rate report for key business metrics.",
-      "How do I run a Pareto (80/20 rule) analysis to find my top products or customers?"
+      "Analyze distributions and identify statistical outliers in my data",
+      "Generate a Month-over-Month growth rate report for key metrics"
     ];
   }
 
   if (activeTable) {
-      schema = `FOCUS EXCLUSIVELY ON THIS TABLE:\n` + schema.split('\n').filter(l => l.includes(`Table: ${activeTable}`)).join('\n');
+    const focusLines = schema.split('\n').filter(l => l.includes(`Table: ${activeTable}`));
+    schema = `ACTIVE TABLE FOCUS:\n${focusLines.join('\n')}\n\nFull Schema:\n${schema}`;
   }
 
-  const historyStr = history.length > 0 ? `DO NOT SUGGEST ANY OF THESE PREVIOUS QUERIES:\n- ${history.join('\n- ')}` : '';
+  const historyStr = history.length > 0
+    ? `\nPREVIOUS QUERIES (do NOT repeat):\n- ${history.slice(-10).join('\n- ')}`
+    : '';
 
-  const prompt = `You are a Senior AI Data Scientist and expert Data Analyst.
-Analyze the exact database schema below and provide exactly 4 highly-specific, sophisticated, and analytical questions that a professional data analyst or data science worker would ask to get deep, actionable business insights or perform advanced data analysis on this dataset.
+  const prompt = `You are a Senior Data Scientist. Based on the database schema, generate exactly 4 sophisticated analytical questions.
 
-Schema context:
+Schema:
 ${schema}
-
 ${historyStr}
 
-CRITICAL RULES FOR GENERATION:
-1. The questions MUST be perfectly solvable using ONLY the exact tables and columns provided in the schema context.
-2. The questions must be geared towards professional data analysis and data science. They should include combinations of the following analytical patterns:
-   - Trend & Time-Series Analysis (e.g., month-over-month growth, weekly trends, seasonal patterns, peak times/dates).
-   - Cohort & Retention Analysis (e.g., tracking customer groups over time, calculating retention rates).
-   - Anomaly & Outlier Detection (e.g., identifying transactions/records that deviate significantly from the average, finding extreme values).
-   - Segment & Pareto (80/20) Analysis (e.g., identifying the top 20% of segments contributing to 80% of metrics, profiling customer segments).
-   - Statistical & Distribution Insights (e.g., finding the average, median, distribution range, or frequency of specific behaviors).
-   - Data Quality & Cleaning (e.g., identifying high null-rate columns, analyzing duplicate distributions).
-3. Do NOT suggest basic or trivial queries like "Select all columns from table" or "List all rows".
-4. Refer to specific table and column names from the schema to make the questions highly relevant and immediately executable.
-5. Provide exactly 4 distinct, highly professional, and natural language questions.
+RULES:
+1. Questions must be solvable using ONLY the tables/columns in the schema.
+2. Focus on advanced analytics: trend analysis, anomaly detection, cohort analysis, statistical distributions, segment analysis, data quality checks.
+3. Refer to specific table and column names.
+4. Questions should be natural language (as a human analyst would ask).
+5. Return a JSON array of exactly 4 strings. No markdown, no explanations.
 
-Output must be a plain JSON array of strings ONLY. Do not include any explanations, markdown blockquotes, or extra text.
-Example format:
-[
-  "What is the Month-over-Month growth rate of sales in the transactions table?",
-  "Identify any transactions where the amount is 3 standard deviations above the average in the payments table.",
-  "Which 20% of customer segments generate 80% of total revenue in the orders table?",
-  "What is the distribution of active days for users grouped by registration cohort?"
-]`;
+Example: ["What is the week-over-week trend in order_amount?", ...]`;
 
   try {
-    const response = await openai.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.75,
-    });
-
-    let rawList = response.choices[0].message.content.trim();
-    // Strip markdown formatting if any
-    rawList = rawList.replace(/^```(json)?\s*/i, '').replace(/\s*```$/, '').trim();
-    
-    const parsed = JSON.parse(rawList);
+    let raw = await llmCall([{ role: 'user', content: prompt }], 0.7);
+    raw = stripMarkdown(raw);
+    const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length > 0) {
       return parsed.slice(0, 4);
     }
-    throw new Error("Parsed content is not a non-empty array");
-  } catch(e) {
-    console.error("Suggestions generator error:", e);
-    const tablePart = activeTable ? `in \`${activeTable}\`` : 'in the active table';
+    throw new Error('Invalid format');
+  } catch (e) {
+    const tablePart = activeTable ? `in \`${activeTable}\`` : 'across available tables';
     return [
-      `Analyze the weekly trend of records ${tablePart}.`,
-      `Identify duplicate records or rows with high missing value counts ${tablePart}.`,
-      `Find the maximum, minimum, and average range distributions ${tablePart}.`,
-      `Analyze potential data quality anomalies or outliers ${tablePart}.`
+      `Analyze the distribution of numeric columns ${tablePart}`,
+      `Identify potential outliers or anomalies ${tablePart}`,
+      `Show month-over-month trends ${tablePart}`,
+      `Find columns with highest null rates ${tablePart}`
     ];
   }
 }
 
+// ─── Data Cleaning Query Generation ──────────────────────────────────────────
+
+export async function generateCleaningQuery(instruction, tableName, schema) {
+  const prompt = `You are an expert Data Engineer. Generate a MySQL query to clean/transform data as requested.
+
+Table: ${tableName}
+Schema: ${schema}
+
+Cleaning Instruction: "${instruction}"
+
+RULES:
+1. Return ONLY the raw SQL — no markdown, no explanations.
+2. Supported operations: remove nulls, fill nulls (with mean/median/mode/specific value), remove duplicates, cast types, trim whitespace, standardize formats.
+3. Use UPDATE, DELETE, or ALTER TABLE as appropriate.
+4. For filling with mean/median: use a subquery to calculate the value.
+5. Always reference the \`__row_id\` column for deduplication.
+
+SQL:`;
+
+  let sql = await llmCall([{ role: 'user', content: prompt }], 0);
+  return stripMarkdown(sql);
+}
+
+// ─── Statistical Analysis Prompt ─────────────────────────────────────────────
+
+export async function generateStatisticalAnalysis(query, data, testType) {
+  const dataStr = JSON.stringify(data).slice(0, 5000);
+
+  const prompt = `You are a Statistician. Interpret the following statistical test results and provide a clear, professional explanation.
+
+User Question: "${query}"
+Test Performed: ${testType}
+Results Data: ${dataStr}
+
+Provide:
+1. A one-line summary of the finding (with statistical significance noted)
+2. Plain English interpretation (what does this mean for the business?)
+3. Confidence level and practical significance
+4. Recommendation based on the finding
+
+Format as clean bullet points. No markdown headers.`;
+
+  return await llmCall([{ role: 'user', content: prompt }], 0.3);
+}
+
+// ─── Forecasting Interpretation ──────────────────────────────────────────────
+
+export async function interpretForecast(query, forecastData) {
+  const dataStr = JSON.stringify(forecastData).slice(0, 5000);
+
+  const prompt = `You are a Business Forecasting Analyst. Interpret the following time-series forecast results.
+
+User Question: "${query}"
+Forecast Results: ${dataStr}
+
+Provide:
+1. Summary of the forecast direction (growth/decline/stable) with specific numbers
+2. Key inflection points or trend changes
+3. Confidence assessment (how reliable is this forecast?)
+4. Business recommendation based on the forecast
+
+Format as clean bullet points. Be concise and specific with numbers.`;
+
+  return await llmCall([{ role: 'user', content: prompt }], 0.3);
+}
+
+// ─── PDF Table Extraction ────────────────────────────────────────────────────
+
 export async function parsePDFTableToJSON(rawText) {
   if (!rawText) return [];
-  // Truncate to avoid context limit issues
   if (rawText.length > 30000) {
-      rawText = rawText.slice(0, 30000) + "... (truncated)";
+    rawText = rawText.slice(0, 30000) + '... (truncated)';
   }
 
-  const prompt = `You are an expert Data Engineer. I have extracted raw text from a PDF document that contains tabular data.
-Because of the extraction process, the rows and columns might be messy, misaligned, or combined.
+  const prompt = `You are an expert Data Engineer. Extract tabular data from the following PDF text and return it as a JSON array of objects.
 
-Your task is to analyze the text, identify the underlying table structure, and reconstruct it into a perfectly formatted JSON array of objects.
+RULES:
+1. Return ONLY a valid JSON array. No markdown, no explanations.
+2. Use snake_case for column keys.
+3. Every object must have identical keys.
+4. If multiple tables exist, pick the most prominent one.
+5. If no tabular data found, return [].
 
-CRITICAL RULES:
-1. Return ONLY a valid JSON array of objects. Do NOT wrap it in markdown block quotes or include any explanatory text.
-2. The keys of each object should represent the column headers (use snake_case for keys).
-3. Every object in the array MUST have the exact same keys.
-4. If there are multiple tables, merge them or pick the most prominent data table.
-5. If no table data can be found, return an empty array [].
-
-Extracted PDF Text:
-${rawText}
-`;
+PDF Text:
+${rawText}`;
 
   try {
-    const response = await openai.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0,
-    });
-
-    let rawList = response.choices[0].message.content.trim();
-    if (rawList.startsWith('\`\`\`json')) rawList = rawList.slice(7);
-    if (rawList.startsWith('\`\`\`')) rawList = rawList.slice(3);
-    if (rawList.endsWith('\`\`\`')) rawList = rawList.slice(0, -3);
-    
-    const parsed = JSON.parse(rawList.trim());
+    let raw = await llmCall([{ role: 'user', content: prompt }], 0);
+    raw = stripMarkdown(raw);
+    const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
-  } catch(e) {
-    console.error("PDF Table to JSON error:", e);
+  } catch (e) {
+    console.error('[LLM] PDF parse error:', e.message);
     return [];
   }
+}
+
+// ─── NL to Regex (Data Extraction) ──────────────────────────────────────────
+
+export async function generateRegexExtraction(instruction, columnName, sampleValues) {
+  const prompt = `You are a regex expert. Generate a MySQL-compatible REGEXP pattern to extract data as described.
+
+Column: ${columnName}
+Sample values: ${JSON.stringify(sampleValues.slice(0, 5))}
+Extraction instruction: "${instruction}"
+
+Return ONLY the MySQL SELECT query that uses REGEXP or REGEXP_SUBSTR to extract the requested data. No markdown.`;
+
+  let sql = await llmCall([{ role: 'user', content: prompt }], 0);
+  return stripMarkdown(sql);
+}
+
+// ─── Stakeholder Summary Generation ──────────────────────────────────────────
+
+export async function generateExecutiveSummary(nlQuery, data, insights) {
+  const dataStr = JSON.stringify(data).slice(0, 3000);
+
+  const prompt = `You are a Business Intelligence Director presenting to C-suite executives. Create a brief, non-technical executive summary.
+
+Analysis Question: "${nlQuery}"
+Key Data Points: ${dataStr}
+Technical Insights: ${insights}
+
+Write a 3-4 sentence executive summary that:
+1. States the key finding in business terms (no technical jargon)
+2. Quantifies the impact where possible
+3. Ends with a clear recommended action
+
+Write in a confident, professional tone. No bullet points — flowing prose only.`;
+
+  return await llmCall([{ role: 'user', content: prompt }], 0.3);
 }

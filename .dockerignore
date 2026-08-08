@@ -1,6 +1,10 @@
 node_modules
 client/node_modules
-.env
+client/dist
 .git
+.env
+uploads/
+*.log
+__pycache__
+*.pyc
 .DS_Store
-uploads

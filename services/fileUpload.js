@@ -4,227 +4,253 @@ import xlsx from 'xlsx';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
-import { executeQuery } from './db.js';
+
+import { pool, sanitizeIdentifier, inferAllColumnTypes, generateCreateTableSQL } from './db.js';
 import { parsePDFTableToJSON } from './llm.js';
 
-function sanitizeName(name, maxLen = 64) {
-  if (!name) return 'col';
-  let san = String(name).trim().replace(/[^a-zA-Z0-9]/g, '_');
-  san = san.replace(/_+/g, '_');
-  if (/^[0-9]/.test(san)) san = 'col_' + san;
-  if (san.length > maxLen) san = san.slice(0, maxLen);
-  san = san.replace(/_$/, ''); // strip trailing underscore
-  return san || 'col';
-}
-
-function generateCreateTableSql(tableName, headers) {
-  const safeTableName = sanitizeName(tableName);
-  const columns = headers.map(h => {
-    let sanName = sanitizeName(h);
-    return `\`${sanName}\` TEXT`;
-  }).join(', ');
-  const sql = `CREATE TABLE IF NOT EXISTS \`${safeTableName}\` (\`_id\` INT AUTO_INCREMENT PRIMARY KEY, ${columns})`;
-  console.log('[fileUpload] generateCreateTableSql | rawTableNameLen:%d safeTableName:%s | SQL: %s',
-    tableName.length, safeTableName, sql);
-  return sql;
-}
-
-function generateInsertSql(tableName, headers, rowCount) {
-  const columns = headers.map(h => {
-    let sanName = sanitizeName(h);
-    return `\`${sanName}\``;
-  }).join(', ');
-  const safe = sanitizeName(tableName);
-  const sql = `INSERT INTO \`${safe}\` (${columns}) VALUES ?`;
-  console.log('[fileUpload] generateInsertSql | safeTable:%s rowCount:%d columns:%d | SQL: %s',
-    safe, rowCount ?? -1, headers.length, sql);
-  return sql;
-}
+// ─── File Processing Entry Point ─────────────────────────────────────────────
 
 export async function processAndImportFile(filePath, originalFilename) {
-  return new Promise(async (resolve, reject) => {
-    let tableName = sanitizeName(originalFilename.split('.')[0]);
-    
-    let headers = [];
-    let rows = [];
+  const ext = originalFilename.toLowerCase().split('.').pop();
+  const tableName = sanitizeIdentifier(originalFilename.replace(/\.[^.]+$/, ''));
 
-    const isExcel = originalFilename.toLowerCase().endsWith('.xlsx') || originalFilename.toLowerCase().endsWith('.xls');
-    const isJson = originalFilename.toLowerCase().endsWith('.json');
-    const isPdf = originalFilename.toLowerCase().endsWith('.pdf');
-    const isCsv = originalFilename.toLowerCase().endsWith('.csv') || originalFilename.toLowerCase().endsWith('.txt') || originalFilename.toLowerCase().endsWith('.tsv');
+  let headers = [];
+  let rows = [];
 
-    if (isExcel) {
-      try {
-        const fileBuffer = fs.readFileSync(filePath);
-        const workbook = xlsx.read(fileBuffer, { type: 'buffer' });
-        const sheetName = workbook.SheetNames[0];
-        const ws = workbook.Sheets[sheetName];
-        if (!ws['!ref']) {
-          return resolve({ tableName, rowsCount: 0 });
-        }
-        
-        // Parse sheet as raw array of arrays to preserve exact index order and column counts
-        const sheetData = xlsx.utils.sheet_to_json(ws, { header: 1 });
-        if (sheetData.length === 0) return resolve({ tableName, rowsCount: 0 });
-        
-        const rawHeaders = sheetData[0];
-        // Clean and sanitize headers, replacing empty ones with defaults
-        headers = rawHeaders.map((h, i) => sanitizeName(h || `col_${i + 1}`));
-        
-        // Map rows dynamically by absolute array index to prevent shifting
-        rows = [];
-        for (let i = 1; i < sheetData.length; i++) {
-          const rowData = sheetData[i];
-          if (!rowData || rowData.length === 0) continue;
-          
-          const out = {};
-          headers.forEach((h, idx) => {
-            const val = rowData[idx];
-            out[h] = val !== undefined && val !== null ? String(val).trim() : null;
-          });
-          rows.push(out);
-        }
-        
-        if (rows.length === 0) return resolve({ tableName, rowsCount: 0 });
-        importData(tableName, headers, rows).then(resolve).catch(reject);
-      } catch (err) {
-        reject(err);
+  switch (ext) {
+    case 'xlsx':
+    case 'xls':
+      ({ headers, rows } = await parseExcel(filePath));
+      break;
+    case 'csv':
+    case 'tsv':
+    case 'txt':
+      ({ headers, rows } = await parseCSV(filePath, ext === 'tsv' ? '\t' : ','));
+      break;
+    case 'json':
+      ({ headers, rows } = await parseJSON(filePath));
+      break;
+    case 'pdf':
+      ({ headers, rows } = await parsePDF(filePath));
+      break;
+    default:
+      throw new Error(`Unsupported file type: .${ext}. Supported: .csv, .xlsx, .xls, .json, .pdf, .tsv, .txt`);
+  }
+
+  // Clean up temp file
+  try { fs.unlinkSync(filePath); } catch (e) { /* ignore */ }
+
+  if (rows.length === 0) {
+    return { tableName, rowsCount: 0, columns: [], types: {} };
+  }
+
+  // Sanitize headers
+  const sanitizedHeaders = headers.map((h, i) => sanitizeIdentifier(h || `col_${i + 1}`));
+
+  // Remap row keys to sanitized headers
+  const cleanRows = rows.map(row => {
+    const out = {};
+    headers.forEach((origH, idx) => {
+      const sanH = sanitizedHeaders[idx];
+      out[sanH] = row[origH] !== undefined ? row[origH] : null;
+    });
+    return out;
+  });
+
+  // Infer column types from actual data
+  const typeMap = inferAllColumnTypes(sanitizedHeaders, cleanRows);
+
+  // Import into database
+  await importToDatabase(tableName, sanitizedHeaders, typeMap, cleanRows);
+
+  // Build type info for response
+  const typeInfo = {};
+  for (const [col, type] of typeMap.entries()) {
+    typeInfo[col] = type;
+  }
+
+  return {
+    tableName,
+    rowsCount: cleanRows.length,
+    columns: sanitizedHeaders,
+    types: typeInfo
+  };
+}
+
+// ─── Excel Parser ────────────────────────────────────────────────────────────
+
+async function parseExcel(filePath) {
+  const fileBuffer = fs.readFileSync(filePath);
+  const workbook = xlsx.read(fileBuffer, { type: 'buffer', cellDates: true });
+  const sheetName = workbook.SheetNames[0];
+  const ws = workbook.Sheets[sheetName];
+
+  if (!ws['!ref']) return { headers: [], rows: [] };
+
+  const sheetData = xlsx.utils.sheet_to_json(ws, { header: 1, defval: null });
+  if (sheetData.length < 2) return { headers: [], rows: [] };
+
+  const rawHeaders = sheetData[0].map(h => String(h || '').trim());
+  const rows = [];
+
+  for (let i = 1; i < sheetData.length; i++) {
+    const rowData = sheetData[i];
+    if (!rowData || rowData.every(v => v === null || v === '')) continue;
+
+    const out = {};
+    rawHeaders.forEach((h, idx) => {
+      let val = rowData[idx];
+      if (val instanceof Date) {
+        val = val.toISOString().split('T')[0];
+      } else if (val !== null && val !== undefined) {
+        val = String(val).trim();
       }
-    } else if (isJson) {
-      try {
-        const rawData = fs.readFileSync(filePath, 'utf8');
-        const parsed = JSON.parse(rawData);
-        const dataArr = Array.isArray(parsed) ? parsed : [parsed];
-        if (dataArr.length === 0) return resolve({ tableName, rowsCount: 0 });
-        
-        // Extract all unique keys from all objects to form complete headers
-        const keySet = new Set();
-        dataArr.forEach(obj => {
-           if (obj && typeof obj === 'object') {
-               Object.keys(obj).forEach(k => keySet.add(k));
-           }
-        });
-        const originalHeaders = Array.from(keySet);
-        headers = originalHeaders.map(h => sanitizeName(h));
-        
-        rows = dataArr.map(r => {
-          const out = {};
-          headers.forEach((h, idx) => {
-            const origKey = originalHeaders[idx];
-            let val = r[origKey];
-            if (val !== null && typeof val === 'object') val = JSON.stringify(val);
-            out[h] = val ?? null;
-          });
-          return out;
-        });
-        importData(tableName, headers, rows).then(resolve).catch(reject);
-      } catch (err) {
-        reject(err);
-      }
-    } else if (isPdf) {
-      try {
-        const dataBuffer = fs.readFileSync(filePath);
-        const pdfData = await pdfParse(dataBuffer);
-        const rawText = pdfData.text;
+      out[h] = val || null;
+    });
+    rows.push(out);
+  }
 
-        const dataArr = await parsePDFTableToJSON(rawText);
-        if (!Array.isArray(dataArr) || dataArr.length === 0) {
-           return resolve({ tableName, rowsCount: 0 });
-        }
+  return { headers: rawHeaders, rows };
+}
 
-        const keySet = new Set();
-        dataArr.forEach(obj => {
-           if (obj && typeof obj === 'object') {
-               Object.keys(obj).forEach(k => keySet.add(k));
-           }
-        });
-        const originalHeaders = Array.from(keySet);
-        if (originalHeaders.length === 0) return resolve({ tableName, rowsCount: 0 });
+// ─── CSV/TSV Parser ──────────────────────────────────────────────────────────
 
-        headers = originalHeaders.map(h => sanitizeName(h));
-        
-        rows = dataArr.map(r => {
-          const out = {};
-          headers.forEach((h, idx) => {
-            const origKey = originalHeaders[idx];
-            let val = r[origKey];
-            if (val !== null && typeof val === 'object') val = JSON.stringify(val);
-            out[h] = val ?? null;
-          });
-          return out;
+function parseCSV(filePath, separator = ',') {
+  return new Promise((resolve, reject) => {
+    const headers = [];
+    const rows = [];
+
+    fs.createReadStream(filePath, { encoding: 'utf-8' })
+      .pipe(csv({ separator }))
+      .on('headers', (h) => {
+        headers.push(...h.map(name => String(name).trim()));
+      })
+      .on('data', (data) => {
+        const out = {};
+        headers.forEach((h, idx) => {
+          const keys = Object.keys(data);
+          const val = data[keys[idx]];
+          out[h] = (val !== undefined && val !== '') ? String(val).trim() : null;
         });
-        importData(tableName, headers, rows).then(resolve).catch(reject);
-      } catch (err) {
-        reject(err);
-      }
-    } else if (isCsv) {
-      // Assume CSV or TXT
-      fs.createReadStream(filePath)
-        .pipe(csv())
-        .on('headers', (h) => {
-          headers = h.map(name => sanitizeName(name));
-        })
-        .on('data', (data) => {
-          // Re-map row keys to match sanitized headers
-          const out = {};
-          Object.keys(data).forEach((origKey, idx) => {
-            if (headers[idx]) {
-              out[headers[idx]] = data[origKey];
-            }
-          });
-          rows.push(out);
-        })
-        .on('end', () => {
-          if (rows.length === 0) return resolve({ tableName, rowsCount: 0 });
-          importData(tableName, headers, rows).then(resolve).catch(reject);
-        })
-        .on('error', reject);
-    } else {
-      reject(new Error(`Unsupported file type: ${originalFilename}. The AI Data Analyst only extracts tables from .csv, .xlsx, .xls, .json, and .pdf files.`));
-    }
+        rows.push(out);
+      })
+      .on('end', () => resolve({ headers, rows }))
+      .on('error', reject);
   });
 }
 
-import { pool } from './db.js';
+// ─── JSON Parser ─────────────────────────────────────────────────────────────
 
-async function importData(tableName, headers, rows) {
-  const connection = await pool.getConnection();
-  try {
-    await connection.execute('SET FOREIGN_KEY_CHECKS=0');
+async function parseJSON(filePath) {
+  const rawData = fs.readFileSync(filePath, 'utf8');
+  const parsed = JSON.parse(rawData);
+  const dataArr = Array.isArray(parsed) ? parsed : [parsed];
 
-    const safeTableName = sanitizeName(tableName);
-    await connection.execute(`DROP TABLE IF EXISTS \`${safeTableName}\``);
+  if (dataArr.length === 0) return { headers: [], rows: [] };
 
-    const createTableStmt = generateCreateTableSql(tableName, headers);
-    await connection.execute(createTableStmt);
-    console.log('[fileUpload] CREATE TABLE OK | table:%s rows:%d cols:%d', safeTableName, rows.length, headers.length);
+  // Collect all unique keys
+  const keySet = new Set();
+  dataArr.forEach(obj => {
+    if (obj && typeof obj === 'object') {
+      Object.keys(obj).forEach(k => keySet.add(k));
+    }
+  });
 
-    // Prepare batch values payload
-    const insertStmt = generateInsertSql(tableName, headers, rows.length);
-    const valuesArray = rows.map(row => {
-      return headers.map(h => {
-        let val = row[h];
-        if (val === undefined || val === null) return null;
-        return val;
-      });
+  const headers = Array.from(keySet);
+  const rows = dataArr.map(r => {
+    const out = {};
+    headers.forEach(h => {
+      let val = r[h];
+      if (val !== null && typeof val === 'object') val = JSON.stringify(val);
+      else if (val !== null && val !== undefined) val = String(val);
+      out[h] = val || null;
     });
+    return out;
+  });
 
-    // Batch insert — larger chunks for better throughput on large data sets
-    const chunkSize = 20000;
-    for (let i = 0; i < valuesArray.length; i += chunkSize) {
-      const chunk = valuesArray.slice(i, i + chunkSize);
-      await connection.query(insertStmt, [chunk]);
+  return { headers, rows };
+}
+
+// ─── PDF Parser ──────────────────────────────────────────────────────────────
+
+async function parsePDF(filePath) {
+  const dataBuffer = fs.readFileSync(filePath);
+  const pdfData = await pdfParse(dataBuffer);
+  const rawText = pdfData.text;
+
+  const dataArr = await parsePDFTableToJSON(rawText);
+  if (!Array.isArray(dataArr) || dataArr.length === 0) {
+    return { headers: [], rows: [] };
+  }
+
+  const keySet = new Set();
+  dataArr.forEach(obj => {
+    if (obj && typeof obj === 'object') {
+      Object.keys(obj).forEach(k => keySet.add(k));
+    }
+  });
+
+  const headers = Array.from(keySet);
+  const rows = dataArr.map(r => {
+    const out = {};
+    headers.forEach(h => {
+      let val = r[h];
+      if (val !== null && typeof val === 'object') val = JSON.stringify(val);
+      else if (val !== null && val !== undefined) val = String(val);
+      out[h] = val || null;
+    });
+    return out;
+  });
+
+  return { headers, rows };
+}
+
+// ─── Database Import with Typed Columns ──────────────────────────────────────
+
+async function importToDatabase(tableName, headers, typeMap, rows) {
+  const connection = await pool.getConnection();
+
+  try {
+    const safeName = sanitizeIdentifier(tableName);
+
+    // Drop existing table
+    await connection.execute(`DROP TABLE IF EXISTS \`${safeName}\``);
+
+    // Create table with inferred types
+    const createSQL = generateCreateTableSQL(tableName, headers, typeMap);
+    await connection.execute(createSQL);
+
+    // Prepare batch insert
+    const safeHeaders = headers.map(h => `\`${sanitizeIdentifier(h)}\``).join(', ');
+    const placeholders = headers.map(() => '?').join(', ');
+    const insertSQL = `INSERT INTO \`${safeName}\` (${safeHeaders}) VALUES (${placeholders})`;
+
+    // Batch insert in chunks
+    const CHUNK_SIZE = 5000;
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + CHUNK_SIZE);
+      const batchPromises = chunk.map(row => {
+        const values = headers.map(h => {
+          const val = row[h];
+          if (val === null || val === undefined || val === '') return null;
+          return val;
+        });
+        return connection.execute(insertSQL, values);
+      });
+
+      // Execute in parallel batches of 50 for throughput
+      const PARALLEL = 50;
+      for (let j = 0; j < batchPromises.length; j += PARALLEL) {
+        await Promise.all(batchPromises.slice(j, j + PARALLEL));
+      }
     }
 
-    await connection.execute('SET FOREIGN_KEY_CHECKS=1');
     connection.release();
+    console.log(`[Upload] Imported ${rows.length} rows into \`${safeName}\` with typed columns`);
 
-    return { tableName, rowsCount: rows.length };
   } catch (error) {
-    await connection.execute('SET FOREIGN_KEY_CHECKS=1');
     connection.release();
-    console.error('[fileUpload] importData ERROR | table:%s rows:%d | raw error:', tableName, rows.length, error.message);
-    if (error.sql) console.error('[fileUpload] FAILED SQL:', error.sql);
-    throw new Error(`SQL Error during import: ${error.message}`);
+    console.error('[Upload] Import error:', error.message);
+    throw new Error(`Database import failed: ${error.message}`);
   }
 }

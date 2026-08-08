@@ -1,68 +1,221 @@
-import { useState, useEffect } from 'react';
-import './index.css';
+import { useState, useEffect, useCallback } from 'react';
+import './App.css';
+import Sidebar from './components/Sidebar';
 import ChatPanel from './components/ChatPanel';
-import WorkflowPanel from './components/WorkflowPanel';
 import ResultsPanel from './components/ResultsPanel';
+import WorkflowPanel from './components/WorkflowPanel';
+import ProfilePanel from './components/ProfilePanel';
 import HistoryDrawer from './components/HistoryDrawer';
 
 function App() {
-  const [query, setQuery] = useState('');
-  const [workflowState, setWorkflowState] = useState('IDLE'); // IDLE, PARSING, EXECUTING, INSIGHTS, CHART, DONE, ERROR
+  // Core state
+  const [workflowState, setWorkflowState] = useState('IDLE');
   const [resultData, setResultData] = useState(null);
   const [messages, setMessages] = useState([
-    { role: 'system', content: 'Hello! I am your AI Data Analyst. Ask me anything about your database.' }
+    { role: 'system', content: 'Welcome to Data Analyst AI. Upload a dataset or ask a question to begin your analysis.' }
   ]);
-  const [suggestions, setSuggestions] = useState([]);
-  const [sqlHistory, setSqlHistory] = useState([]);
-  const [askedQuestions, setAskedQuestions] = useState([]);
+
+  // Database state
   const [dbInfo, setDbInfo] = useState(null);
   const [databases, setDatabases] = useState([]);
   const [activeTable, setActiveTable] = useState(null);
+  const [relationships, setRelationships] = useState([]);
+
+  // Feature state
+  const [suggestions, setSuggestions] = useState([]);
+  const [askedQuestions, setAskedQuestions] = useState([]);
+  const [activePanel, setActivePanel] = useState('results'); // results | profile | stats | forecast
+
+  // History
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [historyLogs, setHistoryLogs] = useState([]);
 
-  const fetchDatabases = async () => {
+  // ─── Data Fetchers ───────────────────────────────────────────────────────
+
+  const fetchDbInfo = useCallback(async () => {
     try {
-      const response = await fetch(`/api/databases?t=${Date.now()}`);
-      const data = await response.json();
+      const res = await fetch('/api/database/info');
+      const data = await res.json();
+      setDbInfo(data);
+    } catch (err) {
+      console.error('Failed to load database info', err);
+    }
+  }, []);
+
+  const fetchDatabases = useCallback(async () => {
+    try {
+      const res = await fetch('/api/database/list');
+      const data = await res.json();
       if (data.databases) setDatabases(data.databases);
     } catch (err) {
       console.error('Failed to load databases', err);
     }
-  };
+  }, []);
 
-  const fetchSuggestions = async (historyObj = askedQuestions, tableContext = activeTable) => {
+  const fetchSuggestions = useCallback(async (history = [], tableCtx = null) => {
     try {
-      const response = await fetch(`/api/suggestions?t=${Date.now()}`, {
+      const res = await fetch('/api/query/suggestions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ history: historyObj, activeTable: tableContext })
+        body: JSON.stringify({ history, activeTable: tableCtx })
       });
-      const data = await response.json();
+      const data = await res.json();
       if (data.suggestions) setSuggestions(data.suggestions);
     } catch (err) {
       console.error('Failed to load suggestions', err);
     }
-  };
+  }, []);
 
-  const fetchHistory = async (tableContext = activeTable) => {
+  const fetchRelationships = useCallback(async () => {
     try {
-      const url = tableContext
-        ? `/api/history?activeTable=${tableContext}&t=${Date.now()}`
-        : `/api/history?t=${Date.now()}`;
-      const response = await fetch(url);
-      const data = await response.json();
+      const res = await fetch('/api/database/relationships');
+      const data = await res.json();
+      if (data.relationships) setRelationships(data.relationships);
+    } catch (err) {
+      console.error('Failed to load relationships', err);
+    }
+  }, []);
+
+  const fetchHistory = useCallback(async (tableCtx = null) => {
+    try {
+      const url = tableCtx
+        ? `/api/history?activeTable=${encodeURIComponent(tableCtx)}`
+        : '/api/history';
+      const res = await fetch(url);
+      const data = await res.json();
       if (data.history) setHistoryLogs(data.history);
     } catch (err) {
-      console.error('Failed to load query history', err);
+      console.error('Failed to load history', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchDatabases();
+    fetchDbInfo();
+    fetchSuggestions([]);
+    fetchHistory();
+  }, [fetchDatabases, fetchDbInfo, fetchSuggestions, fetchHistory]);
+
+  // ─── Handlers ────────────────────────────────────────────────────────────
+
+  const handleDatabaseSwitch = async (newDb) => {
+    try {
+      await fetch('/api/database/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ database: newDb })
+      });
+      setActiveTable(null);
+      fetchDbInfo();
+      fetchSuggestions([], null);
+      fetchRelationships();
+      fetchHistory();
+      addMessage('system', `Switched to database: ${newDb}`);
+    } catch (err) {
+      addMessage('system', `Error switching database: ${err.message}`);
     }
   };
 
-  const clearHistory = async () => {
-    const scopeText = activeTable ? `for table "${activeTable}"` : 'for the database (general)';
-    if (!confirm(`Are you sure you want to clear the history ${scopeText}?`)) return;
+  const handleTableSelect = (table) => {
+    const newTable = table === activeTable ? null : table;
+    setActiveTable(newTable);
+    fetchSuggestions(askedQuestions, newTable);
+    fetchHistory(newTable);
+  };
+
+  const handleFileUpload = async (files) => {
+    const fileArray = Array.from(files);
+    addMessage('user', `Uploading: ${fileArray.map(f => f.name).join(', ')}`);
+    setWorkflowState('PARSING');
+
+    const formData = new FormData();
+    fileArray.forEach(file => formData.append('files', file));
+
     try {
-      await fetch('/api/history', { 
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error);
+
+      addMessage('system', data.message);
+      setWorkflowState('DONE');
+      fetchDbInfo();
+      fetchSuggestions();
+      fetchRelationships();
+    } catch (error) {
+      addMessage('system', `Upload Error: ${error.message}`);
+      setWorkflowState('ERROR');
+    }
+  };
+
+  const handleQuerySubmit = async (userQuery) => {
+    addMessage('user', userQuery);
+    const newAsked = [...askedQuestions, userQuery];
+    setAskedQuestions(newAsked);
+    setWorkflowState('PARSING');
+    setResultData(null);
+    setActivePanel('results');
+
+    const params = new URLSearchParams({ query: userQuery });
+    if (activeTable) params.append('activeTable', activeTable);
+
+    const eventSource = new EventSource(`/api/query/stream?${params.toString()}`);
+
+    eventSource.addEventListener('state', (e) => {
+      setWorkflowState(JSON.parse(e.data));
+    });
+
+    eventSource.addEventListener('result', (e) => {
+      const data = JSON.parse(e.data);
+      setResultData(data);
+      addMessage('system', `Analysis complete — ${data.rowCount || data.data?.length || 0} rows returned in ${data.executionTime || 0}ms`);
+      fetchDbInfo();
+      fetchSuggestions(newAsked, activeTable);
+      fetchHistory(activeTable);
+      eventSource.close();
+    });
+
+    eventSource.addEventListener('error', (e) => {
+      let msg = 'An error occurred during processing.';
+      try { msg = JSON.parse(e.data); } catch { msg = e.data || msg; }
+      setWorkflowState('ERROR');
+      addMessage('system', `Error: ${msg}`);
+      fetchHistory(activeTable);
+      eventSource.close();
+    });
+  };
+
+  const handleCleanData = async (instruction) => {
+    if (!activeTable) {
+      addMessage('system', 'Please select a table first to perform cleaning operations.');
+      return;
+    }
+
+    addMessage('user', `Clean: ${instruction}`);
+    setWorkflowState('EXECUTING');
+
+    try {
+      const res = await fetch('/api/query/clean', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction, tableName: activeTable })
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error);
+
+      addMessage('system', data.message);
+      setWorkflowState('DONE');
+      fetchDbInfo();
+    } catch (error) {
+      addMessage('system', `Cleaning Error: ${error.message}`);
+      setWorkflowState('ERROR');
+    }
+  };
+
+  const handleClearHistory = async () => {
+    try {
+      await fetch('/api/history', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ activeTable })
@@ -73,172 +226,81 @@ function App() {
     }
   };
 
-  const fetchDbInfo = async () => {
-    try {
-      const response = await fetch(`/api/database/info?t=${Date.now()}`);
-      const data = await response.json();
-      setDbInfo(data);
-    } catch (err) {
-      console.error('Failed to load db info', err);
-    }
+  const addMessage = (role, content) => {
+    setMessages(prev => [...prev, { role, content, timestamp: Date.now() }]);
   };
 
-  useEffect(() => {
-    fetchDatabases();
-    fetchSuggestions([]);
-    fetchDbInfo();
-    fetchHistory();
-  }, []);
+  const isProcessing = !['IDLE', 'DONE', 'ERROR'].includes(workflowState);
 
-  const handleDatabaseSwitch = async (newDb) => {
-    try {
-      await fetch('/api/database/switch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ database: newDb })
-      });
-      fetchDbInfo();
-      setActiveTable(null);
-      fetchSuggestions([], null);
-      fetchHistory();
-      setMessages(prev => [...prev, { role: 'system', content: `Environment switched securely to database: ${newDb}` }]);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const handleFileUpload = async (files) => {
-    const fileArray = Array.from(files);
-    const fileNames = fileArray.map(f => f.name).join(', ');
-    setMessages(prev => [...prev, { role: 'user', content: `Uploaded files: ${fileNames}` }]);
-    setWorkflowState('PARSING');
-    
-    const formData = new FormData();
-    fileArray.forEach(file => formData.append('files', file));
-    
-    try {
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData
-      });
-      
-      const text = await response.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (parseErr) {
-        throw new Error(`Server returned HTML (Backend crashed or wrong port): ${text.substring(0, 60)}...`);
-      }
-
-      if (!response.ok) throw new Error(data.error);
-      
-      setMessages(prev => [...prev, { role: 'system', content: data.message }]);
-      setWorkflowState('DONE');
-      fetchSuggestions(); 
-      fetchDbInfo();
-    } catch (error) {
-      setMessages(prev => [...prev, { role: 'system', content: `Error: ${error.message}` }]);
-      setWorkflowState('ERROR');
-    }
-  };
-
-  const handleQuerySubmit = async (userQuery) => {
-    setQuery(userQuery);
-    setMessages(prev => [...prev, { role: 'user', content: userQuery }]);
-    
-    const newAsked = [...askedQuestions, userQuery];
-    setAskedQuestions(newAsked);
-
-    setWorkflowState('PARSING');
-    setResultData(null);
-
-    const params = new URLSearchParams({ query: userQuery });
-    if (activeTable) {
-        params.append('activeTable', activeTable);
-    }
-
-    const eventSource = new EventSource(`/api/query/stream?${params.toString()}`);
-
-    eventSource.addEventListener('state', (e) => {
-        const state = JSON.parse(e.data);
-        setWorkflowState(state);
-    });
-
-    eventSource.addEventListener('result', (e) => {
-        const data = JSON.parse(e.data);
-        setResultData(data);
-        if (data.sql) setSqlHistory(prev => [...prev, data.sql]);
-        setMessages(prev => [...prev, { role: 'system', content: `Query executed successfully! Found ${data.data?.length || 0} rows.` }]);
-        fetchDbInfo();
-        fetchSuggestions(newAsked);
-        fetchHistory();
-        eventSource.close();
-    });
-
-    eventSource.addEventListener('error', (e) => {
-        let msg = 'An error occurred during query processing.';
-        try {
-             msg = JSON.parse(e.data);
-        } catch {
-             msg = e.data || msg;
-        }
-        console.error("SSE Error:", msg);
-        setWorkflowState('ERROR');
-        setMessages(prev => [...prev, { role: 'system', content: `Error: ${msg}` }]);
-        fetchHistory();
-        eventSource.close();
-    });
-  };
+  // ─── Render ──────────────────────────────────────────────────────────────
 
   return (
     <div className="app-container">
-      <header className="app-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          <h1>AI Data Analyst</h1>
-          <span className="badge">Pro</span>
+      <Sidebar
+        dbInfo={dbInfo}
+        databases={databases}
+        activeTable={activeTable}
+        relationships={relationships}
+        onDatabaseSwitch={handleDatabaseSwitch}
+        onTableSelect={handleTableSelect}
+        onHistoryOpen={() => setIsHistoryOpen(true)}
+        onPanelSwitch={setActivePanel}
+        activePanel={activePanel}
+      />
+
+      <main className="main-content">
+        <div className="top-bar">
+          <div className="top-bar-left">
+            <h1 className="app-title">Data Analyst AI</h1>
+            <span className="version-badge">v2.0</span>
+          </div>
+          <div className="top-bar-right">
+            {activeTable && (
+              <span className="active-table-badge">
+                <span className="badge-dot"></span>
+                {activeTable}
+              </span>
+            )}
+          </div>
         </div>
-        <button 
-          className="history-trigger-btn"
-          onClick={() => setIsHistoryOpen(true)}
-          title="View Query History"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 8v4l3 3M3 12a9 9 0 1 1 9 9m-9-9c.3-2.6 1.8-4.8 4-6" />
-          </svg>
-        </button>
-      </header>
-      <main className="three-panel-layout">
-        <section className="panel chat-panel-container">
-          <ChatPanel 
-            messages={messages} 
-            onSubmit={handleQuerySubmit} 
-            onFileUpload={handleFileUpload} 
-            isProcessing={workflowState !== 'IDLE' && workflowState !== 'DONE' && workflowState !== 'ERROR'} 
-            dbInfo={dbInfo}
-            databases={databases}
-            onDatabaseSwitch={handleDatabaseSwitch}
-            activeTable={activeTable}
-            onTableSelect={(t) => {
-              setActiveTable(t);
-              fetchSuggestions(askedQuestions, t);
-              fetchHistory(t);
-            }}
-          />
-        </section>
-        <section className="panel workflow-panel-container">
-          <WorkflowPanel currentState={workflowState} suggestions={suggestions} onSuggestionClick={handleQuerySubmit} />
-        </section>
-        <section className="panel results-panel-container">
-          <ResultsPanel result={resultData} sqlHistory={sqlHistory} />
-        </section>
+
+        <div className="content-grid">
+          <section className="panel-chat">
+            <ChatPanel
+              messages={messages}
+              onSubmit={handleQuerySubmit}
+              onFileUpload={handleFileUpload}
+              onClean={handleCleanData}
+              isProcessing={isProcessing}
+              activeTable={activeTable}
+            />
+          </section>
+
+          <section className="panel-workflow">
+            <WorkflowPanel
+              currentState={workflowState}
+              suggestions={suggestions}
+              onSuggestionClick={handleQuerySubmit}
+            />
+          </section>
+
+          <section className="panel-results">
+            {activePanel === 'results' && (
+              <ResultsPanel result={resultData} activeTable={activeTable} />
+            )}
+            {activePanel === 'profile' && (
+              <ProfilePanel tableName={activeTable} />
+            )}
+          </section>
+        </div>
       </main>
 
-      <HistoryDrawer 
-        isOpen={isHistoryOpen} 
-        onClose={() => setIsHistoryOpen(false)} 
-        history={historyLogs} 
+      <HistoryDrawer
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
+        history={historyLogs}
         activeTable={activeTable}
-        onClearAll={clearHistory} 
+        onClearAll={handleClearHistory}
         onReRun={handleQuerySubmit}
       />
     </div>

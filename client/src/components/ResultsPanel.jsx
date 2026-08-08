@@ -1,119 +1,177 @@
-import React from 'react';
-import './panels.css';
+import { useState } from 'react';
 
-export default function ResultsPanel({ result, sqlHistory }) {
-  const downloadSQL = () => {
-    if (!sqlHistory || sqlHistory.length === 0) return alert('No queries to download!');
-    const content = sqlHistory.join(';\n\n') + ';';
-    const blob = new Blob([content], { type: 'text/sql' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = 'session_history.sql';
-    link.click();
-  };
+export default function ResultsPanel({ result, activeTable }) {
+  const [activeTab, setActiveTab] = useState('insights');
 
-  const downloadCSV = () => {
-    if (!result || !result.data || result.data.length === 0) return alert('No data to download!');
-    const data = result.data;
-    const columns = Object.keys(data[0]);
-    const csvContent = [
+  const handleExportCSV = () => {
+    if (!result?.data?.length) return;
+    const columns = Object.keys(result.data[0]);
+    const csv = [
       columns.join(','),
-      ...data.map(row => columns.map(c => {
-        let val = String(row[c]);
-        // handle commas in csv
-        if (val.includes(',')) val = `"${val}"`; 
-        return val;
+      ...result.data.map(row => columns.map(c => {
+        const val = String(row[c] ?? '');
+        return val.includes(',') ? `"${val}"` : val;
       }).join(','))
     ].join('\n');
-    
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = 'dashboard_data.csv';
-    link.click();
+
+    downloadBlob(csv, 'analysis_data.csv', 'text/csv');
+  };
+
+  const handleExportSQL = () => {
+    if (!result?.sql) return;
+    downloadBlob(result.sql, 'query.sql', 'text/sql');
+  };
+
+  const handleExportPDF = async () => {
+    if (!result) return;
+    try {
+      const res = await fetch('/api/report/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: 'Data Analysis Report',
+          subtitle: activeTable ? `Table: ${activeTable}` : 'General Analysis',
+          analysisResult: result
+        })
+      });
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `report_${Date.now()}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('PDF export failed', err);
+    }
+  };
+
+  const downloadBlob = (content, filename, type) => {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   if (!result) {
     return (
-      <div className="results-panel empty">
-        <div className="empty-state">
-          <p>Results will be displayed here.</p>
+      <div className="results-panel empty-state">
+        <div className="empty-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <path d="M3 9h18M9 3v18" />
+          </svg>
         </div>
+        <h3>No Results Yet</h3>
+        <p>Ask a question or run an analysis to see results here.</p>
       </div>
     );
   }
 
-  const { sql, data, insights, chartImage } = result;
-  const columns = data && data.length > 0 ? Object.keys(data[0]) : [];
+  const { sql, data, insights, chartImage, vizSkipped, rowCount, executionTime } = result;
+  const columns = data?.length > 0 ? Object.keys(data[0]) : [];
 
   return (
-    <div className="results-panel has-data">
-      <div className="chat-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2>Dashboard Results</h2>
-        <div className="export-actions" style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={downloadSQL} className="send-btn" style={{ fontSize: '0.8rem', padding: '6px 12px' }}>Download SQL</button>
-          <button onClick={downloadCSV} className="send-btn" style={{ fontSize: '0.8rem', padding: '6px 12px' }}>Export CSV</button>
+    <div className="results-panel">
+      {/* Header */}
+      <div className="results-header">
+        <div className="results-meta">
+          <span className="meta-item">{rowCount || data?.length || 0} rows</span>
+          {executionTime && <span className="meta-item">{executionTime}ms</span>}
+        </div>
+        <div className="export-actions">
+          <button className="export-btn" onClick={handleExportCSV} title="Export CSV">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+            CSV
+          </button>
+          <button className="export-btn" onClick={handleExportSQL} title="Export SQL">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+            SQL
+          </button>
+          <button className="export-btn export-btn-primary" onClick={handleExportPDF} title="Export PDF Report">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>
+            PDF Report
+          </button>
         </div>
       </div>
-      
+
+      {/* Tabs */}
+      <div className="results-tabs">
+        <button className={`tab-btn ${activeTab === 'insights' ? 'active' : ''}`} onClick={() => setActiveTab('insights')}>Insights</button>
+        <button className={`tab-btn ${activeTab === 'chart' ? 'active' : ''}`} onClick={() => setActiveTab('chart')}>Visualization</button>
+        <button className={`tab-btn ${activeTab === 'data' ? 'active' : ''}`} onClick={() => setActiveTab('data')}>Data Table</button>
+        <button className={`tab-btn ${activeTab === 'sql' ? 'active' : ''}`} onClick={() => setActiveTab('sql')}>SQL</button>
+      </div>
+
+      {/* Tab Content */}
       <div className="results-content">
-        {/* Insights Section */}
-        {insights && (
-          <div className="result-card insights-card">
-            <h3>🔑 Business Insights</h3>
-            <div className="insights-text">
-              {insights.split('\n').map((line, idx) => (
-                <p key={idx}>{line}</p>
-              ))}
-            </div>
+        {activeTab === 'insights' && (
+          <div className="tab-content insights-content">
+            {insights ? (
+              <div className="insights-text">
+                {insights.split('\n').filter(l => l.trim()).map((line, i) => (
+                  <p key={i} className="insight-line">{line}</p>
+                ))}
+              </div>
+            ) : (
+              <p className="no-content">No insights generated.</p>
+            )}
           </div>
         )}
 
-        {/* Chart Section */}
-        {chartImage && (
-          <div className="result-card chart-card">
-            <h3>📈 Visualization</h3>
-            <img src={chartImage} alt="Data Visualization" className="chart-image" />
-          </div>
-        )}
-        {!chartImage && result.vizSkipped && (
-          <div className="result-card chart-card">
-            <h3>📈 Visualization</h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', margin: 0 }}>{result.vizSkipped}</p>
+        {activeTab === 'chart' && (
+          <div className="tab-content chart-content">
+            {chartImage ? (
+              <img src={chartImage} alt="Data Visualization" className="chart-image" />
+            ) : (
+              <div className="no-chart">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M18 20V10M12 20V4M6 20v-6" /></svg>
+                <p>{vizSkipped || 'No visualization available for this query.'}</p>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Data Table Section */}
-        <div className="result-card table-card">
-          <h3>📊 Data Table</h3>
-          {data && data.length > 0 ? (
-            <div className="table-wrapper">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    {columns.map(col => <th key={col}>{col}</th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.slice(0, 100).map((row, i) => (
-                    <tr key={i}>
-                      {columns.map(col => <td key={col}>{row[col]}</td>)}
+        {activeTab === 'data' && (
+          <div className="tab-content table-content">
+            {data && data.length > 0 ? (
+              <div className="data-table-wrapper">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      {columns.map(col => <th key={col}>{col}</th>)}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-              {data.length > 100 && <p className="table-note">Showing first 100 rows.</p>}
-            </div>
-          ) : (
-            <p>No data returned.</p>
-          )}
-        </div>
+                  </thead>
+                  <tbody>
+                    {data.slice(0, 100).map((row, i) => (
+                      <tr key={i}>
+                        {columns.map(col => (
+                          <td key={col} title={String(row[col] ?? '')}>
+                            {row[col] !== null && row[col] !== undefined ? String(row[col]) : <span className="null-val">null</span>}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {data.length > 100 && (
+                  <div className="table-footer">Showing 100 of {data.length} rows</div>
+                )}
+              </div>
+            ) : (
+              <p className="no-content">No data returned.</p>
+            )}
+          </div>
+        )}
 
-        {/* SQL Section */}
-        <div className="result-card sql-card">
-          <h3>💻 Generated SQL</h3>
-          <pre className="sql-code"><code>{sql}</code></pre>
-        </div>
+        {activeTab === 'sql' && (
+          <div className="tab-content sql-content">
+            <pre className="sql-code"><code>{sql}</code></pre>
+          </div>
+        )}
       </div>
     </div>
   );

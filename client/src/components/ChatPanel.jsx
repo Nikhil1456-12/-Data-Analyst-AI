@@ -1,141 +1,136 @@
-import React, { useState, useEffect, useRef } from 'react';
-import './panels.css';
+import { useState, useEffect, useRef } from 'react';
 
-function TableStatItem({ table, isActive, onSelect }) {
-  const [stats, setStats] = useState(null);
-
-  useEffect(() => {
-    fetch(`/api/database/stats/${table.tableName}`)
-      .then(res => res.json())
-      .then(data => setStats(data))
-      .catch(err => setStats({ rowCount: 'Err', totalNulls: 'Err', totalDuplicates: 'Err' }));
-  }, [table.tableName]);
-
-  return (
-    <li className={`table-item ${isActive ? 'active' : ''}`} onClick={() => onSelect(isActive ? null : table.tableName)} style={{ cursor: 'pointer' }}>
-      <strong>{table.tableName}</strong>
-      {!stats ? (
-        <div className="table-stats">
-          <span className="stat-badge" style={{ background: '#f1f5f9', color: '#64748b' }}>Calculating heavy stats...</span>
-        </div>
-      ) : (
-        <div className="table-stats">
-          <span className="stat-badge rows">Rows: {stats.rowCount}</span>
-          <span className="stat-badge nulls" title="Total NULL fields">Nulls: {stats.totalNulls}</span>
-          <span className="stat-badge dups" title="Fully repeated rows">Dups: {stats.totalDuplicates}</span>
-        </div>
-      )}
-    </li>
-  );
-}
-
-export default function ChatPanel({ messages, onSubmit, onFileUpload, isProcessing, dbInfo, databases, onDatabaseSwitch, activeTable, onTableSelect }) {
+export default function ChatPanel({ messages, onSubmit, onFileUpload, onClean, isProcessing, activeTable }) {
   const [input, setInput] = useState('');
-  const endOfMessagesRef = useRef(null);
+  const [mode, setMode] = useState('analyze'); // analyze | clean
+  const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
-    endOfMessagesRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (input.trim() && !isProcessing) {
+    if (!input.trim() || isProcessing) return;
+
+    if (mode === 'clean') {
+      onClean(input.trim());
+    } else {
       onSubmit(input.trim());
-      setInput('');
     }
+    setInput('');
   };
 
   const handleFileChange = (e) => {
-    const files = e.target.files;
-    if (files && files.length > 0 && onFileUpload) {
-      onFileUpload(files);
+    if (e.target.files?.length > 0) {
+      onFileUpload(e.target.files);
     }
-    // reset input
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
   };
 
   return (
     <div className="chat-panel">
-      {/* Database Explorer Section */}
-      <div className="db-explorer">
-        <div className="chat-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <h2>🗄️ Database: </h2>
-          <select 
-            value={dbInfo?.dbName || ''} 
-            onChange={(e) => onDatabaseSwitch(e.target.value)}
-            style={{ padding: '4px', borderRadius: '4px', border: '1px solid var(--border-color)', fontSize: '0.9rem' }}
+      <div className="chat-header">
+        <h2>Analysis Chat</h2>
+        <div className="mode-toggle">
+          <button
+            className={`mode-btn ${mode === 'analyze' ? 'active' : ''}`}
+            onClick={() => setMode('analyze')}
+            title="Ask analytical questions"
           >
-            {(!databases || databases.length === 0) && <option value="">Loading...</option>}
-            {databases && databases.map(db => (
-              <option key={db} value={db}>{db}</option>
-            ))}
-          </select>
-        </div>
-        <div className="explorer-content">
-          {dbInfo && dbInfo.tables && dbInfo.tables.length > 0 ? (
-            <ul className="table-list">
-              {dbInfo.tables.map(table => (
-                <TableStatItem 
-                  key={table.tableName} 
-                  table={table} 
-                  isActive={activeTable === table.tableName}
-                  onSelect={onTableSelect}
-                />
-              ))}
-            </ul>
-          ) : (
-            <p className="no-tables">No tables currently available.</p>
-          )}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+            Analyze
+          </button>
+          <button
+            className={`mode-btn ${mode === 'clean' ? 'active' : ''}`}
+            onClick={() => setMode('clean')}
+            title="Data cleaning operations"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+            Clean
+          </button>
         </div>
       </div>
 
-      {/* Chat Section */}
-      <div className="chat-header" style={{ borderTop: '1px solid var(--border-color)' }}>
-        <h2>💬 Chat Session</h2>
-      </div>
       <div className="messages-container">
         {messages.map((msg, idx) => (
-          <div key={idx} className={`message ${msg.role === 'user' ? 'message-user' : 'message-system'}`}>
-            <div className="message-bubble">{msg.content}</div>
+          <div key={idx} className={`message message-${msg.role}`}>
+            <div className="message-avatar">
+              {msg.role === 'user' ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" /></svg>
+              )}
+            </div>
+            <div className="message-content">
+              <div className="message-bubble">{msg.content}</div>
+            </div>
           </div>
         ))}
         {isProcessing && (
           <div className="message message-system">
-            <div className="message-bubble typing-indicator">
-              <span></span><span></span><span></span>
+            <div className="message-avatar">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" /></svg>
+            </div>
+            <div className="message-content">
+              <div className="message-bubble typing">
+                <span className="dot"></span>
+                <span className="dot"></span>
+                <span className="dot"></span>
+              </div>
             </div>
           </div>
         )}
-        <div ref={endOfMessagesRef} />
+        <div ref={messagesEndRef} />
       </div>
+
       <form className="chat-input-form" onSubmit={handleSubmit}>
-        <input 
-          type="file" 
+        <input
+          type="file"
           multiple
-          style={{ display: 'none' }}
           ref={fileInputRef}
           onChange={handleFileChange}
+          accept=".csv,.xlsx,.xls,.json,.pdf,.tsv,.txt"
+          style={{ display: 'none' }}
         />
-        <button 
-          type="button" 
-          className="send-btn" 
-          style={{ backgroundColor: '#64748b' }}
+        <button
+          type="button"
+          className="input-action-btn"
           onClick={() => fileInputRef.current?.click()}
           disabled={isProcessing}
+          title="Upload files"
         >
-          📎
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="17 8 12 3 7 8" />
+            <line x1="12" y1="3" x2="12" y2="15" />
+          </svg>
         </button>
-        <input 
-          type="text" 
+        <input
+          type="text"
+          className="chat-input"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask a question about your data..."
+          onKeyDown={handleKeyDown}
+          placeholder={mode === 'clean'
+            ? `Describe cleaning operation${activeTable ? ` for ${activeTable}` : ''}...`
+            : 'Ask a question about your data...'
+          }
           disabled={isProcessing}
-          className="chat-input"
         />
-        <button type="submit" disabled={isProcessing || !input.trim()} className="send-btn">
-          Send
+        <button type="submit" className="send-btn" disabled={isProcessing || !input.trim()}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <line x1="22" y1="2" x2="11" y2="13" />
+            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+          </svg>
         </button>
       </form>
     </div>

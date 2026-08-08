@@ -1,69 +1,70 @@
-import React from 'react';
-import './panels.css';
-
 const WORKFLOW_STEPS = [
-  { id: 'PARSING', label: 'NL to SQL Parsing' },
-  { id: 'VALIDATING', label: 'Validating SQL' },
-  { id: 'EXECUTING', label: 'Executing Query' },
-  { id: 'INSIGHTS', label: 'Generating Insights' },
-  { id: 'CHART', label: 'Python Visualization' },
+  { id: 'PARSING', label: 'NL → SQL', icon: '🔄' },
+  { id: 'VALIDATING', label: 'Validating', icon: '🛡️' },
+  { id: 'EXECUTING', label: 'Executing', icon: '⚡' },
+  { id: 'INSIGHTS', label: 'Insights', icon: '💡' },
+  { id: 'CHART', label: 'Visualization', icon: '📊' },
 ];
 
 export default function WorkflowPanel({ currentState, suggestions, onSuggestionClick }) {
-  const getStepStatus = (stepId, currentState) => {
-    if (currentState === 'IDLE') return 'waiting';
+  const getStepStatus = (stepId) => {
+    if (currentState === 'IDLE') return 'idle';
     if (currentState === 'ERROR') return 'error';
     if (currentState === 'DONE') return 'done';
 
-    const currentIndex = WORKFLOW_STEPS.findIndex(s => s.id === currentState);
-    const stepIndex = WORKFLOW_STEPS.findIndex(s => s.id === stepId);
+    const currentIdx = WORKFLOW_STEPS.findIndex(s => s.id === currentState);
+    const stepIdx = WORKFLOW_STEPS.findIndex(s => s.id === stepId);
 
-    if (stepIndex < currentIndex) return 'done';
-    if (stepIndex === currentIndex) return 'active';
-    return 'waiting';
+    if (stepIdx < currentIdx) return 'done';
+    if (stepIdx === currentIdx) return 'active';
+    return 'pending';
   };
 
   return (
     <div className="workflow-panel">
-      <div className="chat-header">
-        <h2>Task Workflow</h2>
-      </div>
-      <div className="workflow-steps">
-        {WORKFLOW_STEPS.map((step, idx) => {
-          const status = getStepStatus(step.id, currentState);
-          return (
-            <div key={step.id} className={`workflow-step ${status}`}>
-              <div className="step-indicator">
-                {status === 'done' ? '✓' : idx + 1}
+      {/* Pipeline Progress */}
+      <div className="workflow-section">
+        <h3 className="section-title">Pipeline</h3>
+        <div className="workflow-steps">
+          {WORKFLOW_STEPS.map((step) => {
+            const status = getStepStatus(step.id);
+            return (
+              <div key={step.id} className={`workflow-step step-${status}`}>
+                <div className="step-icon">
+                  {status === 'done' ? (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                  ) : status === 'active' ? (
+                    <div className="step-spinner"></div>
+                  ) : (
+                    <span className="step-emoji">{step.icon}</span>
+                  )}
+                </div>
+                <span className="step-label">{step.label}</span>
               </div>
-              <div className="step-label">{step.label}</div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
 
-      <div className="chat-header" style={{ borderTop: '1px solid var(--border-color)', marginTop: 'auto' }}>
-        <h2>💡 Suggested Queries</h2>
-      </div>
-      <div className="suggestions-list" style={{ padding: '16px', overflowY: 'auto' }}>
-        {(!suggestions || suggestions.length === 0) ? (
-          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Waiting for database schema context...</p>
-        ) : (
-          suggestions.map((sug, i) => (
-            <div 
-              key={i} 
-              className="suggestion-item" 
-              onClick={() => onSuggestionClick(sug)}
-              style={{
-                padding: '10px', backgroundColor: '#f1f5f9', borderRadius: '6px', 
-                marginBottom: '8px', cursor: 'pointer', fontSize: '0.85rem', 
-                color: 'var(--primary)', border: '1px solid #e2e8f0', transition: 'all 0.2s'
-              }}
-            >
-              {sug}
-            </div>
-          ))
-        )}
+      {/* Suggestions */}
+      <div className="workflow-section suggestions-section">
+        <h3 className="section-title">Suggested Queries</h3>
+        <div className="suggestions-list">
+          {suggestions.length > 0 ? (
+            suggestions.map((sug, i) => (
+              <button
+                key={i}
+                className="suggestion-card"
+                onClick={() => onSuggestionClick(sug)}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+                <span>{sug}</span>
+              </button>
+            ))
+          ) : (
+            <p className="no-suggestions">Upload data to get AI-generated query suggestions</p>
+          )}
+        </div>
       </div>
     </div>
   );

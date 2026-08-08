@@ -1,257 +1,98 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import dotenv from 'dotenv';
-import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { executeQuery, getDatabaseInfo, getTableStats, getDatabases, switchDatabase, ensureHistoryTable, saveHistoryRecordEntry, getHistoryRecords, clearHistoryRecords } from './services/db.js';
-import { processNLQuery, generateInsights, generatePythonVizCode, generateSuggestions } from './services/llm.js';
-import { runPythonViz } from './services/pythonViz.js';
-import { processAndImportFile } from './services/fileUpload.js';
+
+import { apiLimiter } from './middleware/rateLimiter.js';
+import { ensureSystemTables } from './services/db.js';
+
+// Route imports
+import authRoutes from './routes/auth.js';
+import databaseRoutes from './routes/database.js';
+import queryRoutes from './routes/query.js';
+import uploadRoutes from './routes/upload.js';
+import profileRoutes from './routes/profile.js';
+import statisticsRoutes from './routes/statistics.js';
+import forecastRoutes from './routes/forecast.js';
+import reportRoutes from './routes/report.js';
+import historyRoutes from './routes/history.js';
 
 dotenv.config();
 
-const upload = multer({
-  dest: 'uploads/',
-  limits: {
-    fileSize: 250 * 1024 * 1024, // 250 MB per file
-    files: 20                    // max 20 files per request
-  }
-});
-
-
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '100mb' }));
-
-// In-Memory cache for LLM AI Queries
-const queryCache = new Map();
-
-// Setup static file serving for the React Frontend in production
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const app = express();
+
+// Security headers
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
+
+// CORS
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' ? false : '*',
+  credentials: true
+}));
+
+// Body parsing
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+
+// Global rate limiter
+app.use('/api/', apiLimiter);
+
+// Static files (production frontend)
 app.use(express.static(path.join(__dirname, 'client/dist')));
 
-app.post('/api/upload', upload.array('files'), async (req, res) => {
-  if (!req.files || req.files.length === 0) {
-    return res.status(400).json({ error: 'No files uploaded' });
-  }
+// API Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/database', databaseRoutes);
+app.use('/api/query', queryRoutes);
+app.use('/api/upload', uploadRoutes);
+app.use('/api/profile', profileRoutes);
+app.use('/api/statistics', statisticsRoutes);
+app.use('/api/forecast', forecastRoutes);
+app.use('/api/report', reportRoutes);
+app.use('/api/history', historyRoutes);
 
-  try {
-    const results = [];
-    for (const file of req.files) {
-      const result = await processAndImportFile(file.path, file.originalname);
-      results.push(`${result.rowsCount} rows into \`${result.tableName}\``);
-    }
-    
-    // Invalidate the query cache whenever new data is uploaded to prevent stale insights
-    queryCache.clear();
-
-    res.json({ success: true, message: `Successfully imported: ${results.join(', ')}` });
-  } catch (error) {
-    console.error('File processing error:', error);
-    res.status(500).json({ error: error.message || 'Failed to process and import file.' });
-  }
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'healthy', version: '2.0.0', timestamp: new Date().toISOString() });
 });
 
-app.get('/api/database/info', async (req, res) => {
-  try {
-    const info = await getDatabaseInfo();
-    res.json(info);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/database/stats/:tableName', async (req, res) => {
-  try {
-    const stats = await getTableStats(req.params.tableName);
-    res.json(stats);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/databases', async (req, res) => {
-  try {
-    const dbs = await getDatabases();
-    res.json({ databases: dbs });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/database/switch', async (req, res) => {
-  try {
-    const { database } = req.body;
-    await switchDatabase(database);
-    res.json({ success: true, message: `Switched to database: ${database}` });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/suggestions', async (req, res) => {
-  try {
-    const { history, activeTable } = req.body;
-    const suggestions = await generateSuggestions(history || [], activeTable);
-    res.json({ suggestions });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to generate suggestions.' });
-  }
-});
-
-app.get('/api/history', async (req, res) => {
-  try {
-    const { activeTable } = req.query;
-    const history = await getHistoryRecords(activeTable || null);
-    res.json({ history });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to retrieve query history.' });
-  }
-});
-
-app.delete('/api/history', async (req, res) => {
-  try {
-    const activeTable = req.body.activeTable || req.query.activeTable;
-    await clearHistoryRecords(activeTable || null);
-    res.json({ success: true, message: 'Query history cleared successfully.' });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to clear query history.' });
-  }
-});
-
-app.get('/api/query/stream', async (req, res) => {
-  const { query, activeTable } = req.query;
-  if (!query) {
-    return res.status(400).json({ error: 'Query is required' });
-  }
-
-  // Set up SSE
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive'
-  });
-
-  const sendEvent = (type, data) => {
-    res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-
-  let sqlQuery = null;
-  try {
-    const cacheKey = `${query.trim().toLowerCase()}_${activeTable || 'none'}`;
-    if (queryCache.has(cacheKey)) {
-      console.log('Cache hit for query:', cacheKey);
-      sendEvent('state', 'DONE');
-      sendEvent('result', queryCache.get(cacheKey));
-      return res.end();
-    }
-
-    sendEvent('state', 'PARSING');
-    // 1. Convert NL to SQL
-    sqlQuery = await processNLQuery(query, activeTable);
-    
-    sendEvent('state', 'VALIDATING');
-    // 1.5 Validate SQL (Ensure SELECT only)
-    const normalizedSql = sqlQuery.trim().toUpperCase();
-    if (!normalizedSql.startsWith('SELECT')) {
-      sendEvent('error', 'Security Exception: Only SELECT queries are permitted by the current workflow rules.');
-      await saveHistoryRecordEntry(query, sqlQuery, 'error', 0, 'Security Exception: Only SELECT queries are permitted.', activeTable || null);
-      return res.end();
-    }
-
-    sendEvent('state', 'EXECUTING');
-    // 2. Execute SQL
-    const dbResult = await executeQuery(sqlQuery);
-
-    if (!Array.isArray(dbResult)) {
-        sendEvent('error', 'Unexpected Database Response. Expected an array of rows from a SELECT query.');
-        return res.end();
-    }
-
-    if (dbResult.length === 0) {
-      sendEvent('state', 'DONE');
-      sendEvent('result', {
-        sql: sqlQuery,
-        data: [],
-        insights: 'Query executed successfully, but returned no data.',
-        chartImage: null
-      });
-      return res.end();
-    }
-    
-    sendEvent('state', 'INSIGHTS');
-    // 3. Generate Insights & Chart config
-    const insights = await generateInsights(query, dbResult);
-    
-    sendEvent('state', 'CHART');
-    let pythonCode = null;
-    let vizSkipped = null;
-
-    // Only generate visualizations if we have 2 or more variables (columns) to plot!
-    if (Object.keys(dbResult[0]).length >= 2) {
-       pythonCode = await generatePythonVizCode(query, dbResult);
-    } else {
-       vizSkipped = "Visualization skipped: Query returned only 1 variable. Visualizations require 2 or more variables.";
-    }
-
-    // 4. Generate Python Chart (Base64 Image)
-    let chartImage = null;
-    if (pythonCode && dbResult.length > 0) {
-      try {
-        chartImage = await runPythonViz(pythonCode, dbResult);
-      } catch (err) {
-        console.error("Error generating python viz:", err);
-      }
-    }
-
-    const resultPayload = {
-      sql: sqlQuery,
-      data: dbResult,
-      insights,
-      chartImage,
-      vizSkipped
-    };
-
-    // Cache the result for subsequent identical queries
-    queryCache.set(cacheKey, resultPayload);
-
-    // Save successful history entry
-    await saveHistoryRecordEntry(query, sqlQuery, 'success', dbResult.length, null, activeTable || null);
-
-    sendEvent('state', 'DONE');
-    sendEvent('result', resultPayload);
-    res.end();
-
-  } catch (error) {
-    console.error(error);
-    await saveHistoryRecordEntry(query, sqlQuery, 'error', 0, error.message || 'An error occurred during query processing.', activeTable || null);
-    sendEvent('error', error.message || 'An error occurred during query processing.');
-    res.end();
-  }
-});
-
-// Global error handler to catch all exceptions and send JSON instead of Express HTML default
+// Global error handler
 app.use((err, req, res, next) => {
-  console.error('Unhandled app error:', err);
-  res.status(500).json({ error: err.message || 'Internal Server Error' });
+  console.error('[Server Error]', err.stack || err.message);
+  const status = err.status || 500;
+  res.status(status).json({
+    error: process.env.NODE_ENV === 'production'
+      ? 'An internal server error occurred.'
+      : err.message || 'Internal Server Error'
+  });
 });
 
-// Wildcard route to serve the React application for any unknown routes (SPA routing)
+// SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'client/dist', 'index.html'));
 });
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`\n  ╔══════════════════════════════════════════╗`);
+  console.log(`  ║   Data Analyst AI — v2.0.0               ║`);
+  console.log(`  ║   Running on http://localhost:${PORT}        ║`);
+  console.log(`  ╚══════════════════════════════════════════╝\n`);
+
   try {
-    await ensureHistoryTable();
+    await ensureSystemTables();
+    console.log('  ✓ System tables verified');
   } catch (err) {
-    console.error("Failed to initialize history table at startup:", err);
+    console.error('  ✗ Failed to initialize system tables:', err.message);
   }
 });
+
+export default app;
