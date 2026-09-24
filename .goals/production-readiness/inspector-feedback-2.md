@@ -1,51 +1,57 @@
-# Inspector verdict — iteration 2
+﻿# Inspector verdict — iteration 2
 
 ## Verdict
 
 **FAIL**
 
-Commit `adcd2bb` fixes the cleaning-SQL scope bypass, replaces the vulnerable direct `xlsx` dependency, and leaves the requested lint, test, build, and production audit commands green. The implementation still does not satisfy the upload resource-control and test-coverage acceptance criteria.
+The builder fixed the vulnerable production dependency and improved CSV/JSON limit handling, and all requested commands were run. The goal is not yet production-ready: the streaming cleaning endpoint still uses the permissive validator instead of the exact-table cleaning validator, Excel/PDF parsing still materializes unbounded structures before row limits are applied, Multer failures can leave temporary files behind, and the new tests do not exercise the critical replacement/cleanup/SSE paths.
 
 ## Quality gates run
 
-- `npm test`: **PASS** (9 tests)
-- `npm run lint`: **PASS**
-- `npm run build`: **PASS** (Vite production build)
-- `npm audit --omit=dev`: **PASS** (`found 0 vulnerabilities`)
+- `npm test`: **PASS** — 9 tests.
+- `npm run lint`: **PASS**.
+- `npm run build`: **PASS** — Vite production build. The client install emitted its own 5-vulnerability dev audit notice, but the build completed.
+- `npm audit --omit=dev`: **PASS** — 0 production vulnerabilities.
 
 ## Acceptance-criteria review
 
-1. **JWT route protection — satisfied for the current route inventory.** Registered data routes use `optionalAuth`, whose implementation rejects missing or invalid bearer tokens. Health and authentication endpoints remain public. The upload test now verifies a missing token receives `401`.
-2. **SQL validation — substantially fixed and satisfied for the reviewed bypasses.** `validateCleaningSQL` requires an exact leading `UPDATE <requested table> SET` or `DELETE FROM <requested table>` form and rejects joins, `USING`, subqueries, `SELECT`, and `UNION`. The added regression tests cover multi-table targets and the principal scope-bypass forms.
-3. **Uploads — fail.** CSV and JSON now stop streaming at the row limit, and parser byte/column checks exist. However, `parseExcel` calls `readXlsxFile(filePath)` before checking `MAX_ROWS`; the complete workbook is materialized in `sheetData`, so a workbook over the row limit can consume memory before rejection. PDF parsing similarly obtains the complete model-produced row array before applying the row limit. In addition, cleanup is only in the route handler's `finally`: Multer errors such as `LIMIT_FILE_SIZE`, too many files, or a rejected file type occur before the handler runs, so any files already written by Multer are not covered by that cleanup path.
-4. **Dependencies/audit — satisfied for the executed production audit.** The direct `xlsx` dependency is removed and `npm audit --omit=dev` exits successfully with zero vulnerabilities. The README still describes the old unavoidable `xlsx` residual and should be corrected in the implementation iteration because it now contradicts the dependency state.
-5. **Tests — fail/incomplete.** The new tests provide useful parser-limit and helper smoke coverage, but they do not exercise bounded Excel materialization, PDF row bounds, temporary-file deletion on processing or Multer failure, same-name replacement conflict versus explicit replacement against the database, or the actual SSE route's failing-query path. `formatSSE` serialization alone does not prove end-to-end SSE error delivery.
-6. **Quality gates — satisfied.** All four required commands passed.
-7. **Compatibility/scope — no unrelated regression observed in the reviewed diff.**
+1. **JWT route protection — PASS for the registered API inventory.** The data, database, query, upload, profile, statistics, forecast, report, and history route handlers use `optionalAuth`, which delegates to mandatory bearer-token verification. Authentication and health remain public. The current tests verify middleware and the upload route's unauthenticated response, though route-wide regression coverage would still be useful.
+2. **SQL validation — FAIL.** `validateCleaningSQL` is restrictive for `POST /api/query/clean`, but `GET /api/query/stream?mode=clean` calls `validateGeneratedSQL(..., { allowMutation: true, tableName })` directly. That validator only checks that the requested table name appears somewhere; it does not enforce one exact mutation target. A multi-table mutation or a mutation of another table containing the active table name can therefore pass the streaming cleaning path. This violates the cleaning arbitrary-SQL prohibition.
+3. **Uploads — FAIL.** Replacement is opt-in in the normal import path (`replace=true` is required to drop an existing table), but the endpoint-level and database replacement behavior are not meaningfully tested. CSV and JSON now reject while streaming, but `readXlsxFile` first loads the complete workbook into `sheetData` and `parsePDF` first reads the complete file and sends the complete LLM-produced row array through key collection before limits are checked. A file below the byte cap can still create an oversized row structure before rejection. Multer's parser/filter errors occur before the route handler, so its `finally` block never runs; files already written by disk storage can remain when a later file violates limits or has an unsupported extension.
+4. **Dependencies/audit — PASS.** The vulnerable `xlsx` package is removed/replaced by `read-excel-file`, and the required production audit exits successfully with zero vulnerabilities.
+5. **Automated tests — FAIL.** The nine tests cover auth helpers, SQL smoke cases, CSV/JSON row limits, SSE formatting, and an unauthenticated upload request. They do not test the stream cleaning route, exact replacement conflict/explicit replacement against the import layer, Multer failure cleanup, Excel/PDF bounded parsing, or an actual SSE error response after headers are sent. The existing SQL tests exercise `validateCleaningSQL`, but not the validator actually used by stream cleaning.
+6. **Quality gates — PASS.** Test, lint, frontend build, and production audit all completed successfully.
+7. **Compatibility/scope — PASS with the above security gaps.** No unrelated worktree changes were present, and no secrets were introduced.
 
 ## Blocking findings
 
-### 1. Excel row limits are enforced after full workbook materialization
+### 1. Streaming cleaning bypasses exact-target validation — High
 
-**File:** `E:\Projects\-Data-Analyst-AI\services\fileUpload.js:91`
+**File:** `routes/query.js`, stream validation branch; `services/sqlSecurity.js`
 
-**Severity:** High
+The stream route allows mutation mode and invokes `validateGeneratedSQL` rather than `validateCleaningSQL`. `validateGeneratedSQL` accepts `UPDATE`/`DELETE` whenever the requested table name occurs anywhere in the statement. Consequently, the SSE cleaning route has a different and weaker security policy than the JSON cleaning route. Route both cleaning paths through the exact-target validator and add regression tests for multi-table `UPDATE`, `DELETE ... USING`, aliases/joins, and another-table mutations.
 
-`readXlsxFile(filePath)` returns the entire worksheet before the loop checks `MAX_ROWS`. The later `rows.length >= MAX_ROWS` guard therefore limits database/import work but does not bound parser memory. A valid workbook within the byte limit but containing more than 100,000 rows can be fully allocated before the request is rejected, violating the requirement that upload limits be enforced before dangerous materialization.
+### 2. Excel and PDF parser limits are post-materialization — High
 
-**Suggested fix:** Use a workbook reader that supports bounded/streaming row iteration, or reject/limit rows during workbook parsing before retaining the full sheet. Add a test that demonstrates an oversized workbook is rejected at the parser boundary without retaining all rows.
+**File:** `services/fileUpload.js`
 
-### 2. Upload cleanup does not cover Multer failures
+`parseExcel` calls `readXlsxFile(filePath)` before iterating and checking `MAX_ROWS`; `parsePDF` reads the entire file and obtains the complete parsed row array before checking column/row limits. The stated resource controls therefore do not bound transient parser memory. Add parser-level bounded behavior (or reject/limit before materialization using supported streaming/row options) and tests that demonstrate early rejection.
 
-**File:** `E:\Projects\-Data-Analyst-AI\routes\upload.js:31-59`
+### 3. Multer failure cleanup is incomplete — High
 
-**Severity:** High
+**File:** `routes/upload.js`
 
-The `try/finally` begins only after `upload.array('files', 20)` succeeds. Multer can create temporary files and then call `next(err)` for a file-size, file-count, or file-filter error; in those cases the async handler and its `finally` block are skipped. The global error handler only sends a response and does not remove `req.files` or otherwise clean the upload directory. Thus the claimed reliable cleanup is limited to handler-level success/failure, not all upload failures.
+The cleanup `finally` is inside the handler after `upload.array(...)`. Multer errors (file-size limit, file-count limit, file-filter rejection) prevent that handler from running, while disk storage may already have created files. Add an upload middleware/error path that tracks and removes files on parser failure, and test a failure after at least one file has been written.
 
-**Suggested fix:** Add an upload-specific error middleware that cleans files recorded by Multer before returning the error, or move cleanup into a wrapper that covers both Multer and processing errors. Test at least one Multer failure after a prior file has been written.
+### 4. Critical behavior lacks meaningful integration tests — Medium
 
-## Test-quality gap
+The replacement test only checks `isReplacementRequested`; it does not prove a same-named table returns 409 without replacement or succeeds when replacement is explicitly requested. The SSE test only checks string formatting, not an authenticated request that reaches an error after SSE headers are emitted. These gaps allowed the stream validator mismatch and cleanup issue to remain undetected.
 
-The route/upload/SSE additions still do not verify the critical behavior requested by the goal. In particular, the tests are not end-to-end for replacement conflict, cleanup, or SSE failure delivery, and there is no Excel/PDF bounded-materialization test. These gaps mean the two blocking behaviors above can remain undetected while the suite is green.
+## Required next iteration
 
+- Use the exact cleaning validator for every cleaning execution path, including SSE.
+- Make Excel/PDF parsing bounded at the parser boundary, not only after rows exist.
+- Clean temporary files when Multer itself fails.
+- Add focused route/import/cleanup/SSE regression tests, then rerun all four quality gates.
+
+FAIL
