@@ -41,5 +41,16 @@ export function validateGeneratedSQL(sql, { allowMutation = false, tableName = n
 }
 
 export function validateCleaningSQL(sql, tableName) {
-  return validateGeneratedSQL(sql, { allowMutation: true, tableName });
+  validateIdentifier(tableName, 'table name');
+  const statement = validateGeneratedSQL(sql, { allowMutation: true });
+  const escaped = tableName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const target = new RegExp(`^UPDATE\\s+\\\`?${escaped}\\\`?\\s+SET\\b`, 'i');
+  const deleteTarget = new RegExp(`^DELETE\\s+FROM\\s+\\\`?${escaped}\\\`?\\s*(?:WHERE\\b|$)`, 'i');
+  if (!target.test(statement) && !deleteTarget.test(statement)) {
+    throw new Error('Cleaning query targets an unexpected table');
+  }
+  if (/\b(?:JOIN|USING|SELECT|UNION)\b/i.test(statement)) {
+    throw new Error('Cleaning query must target only the requested table');
+  }
+  return statement;
 }

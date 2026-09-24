@@ -1,15 +1,17 @@
 import fs from 'fs';
 import csv from 'csv-parser';
-import xlsx from 'xlsx';
+import readXlsxFile from 'read-excel-file/node';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
+import { streamArray } from 'stream-json/streamers/stream-array.js';
 
 import { pool, sanitizeIdentifier, inferAllColumnTypes, generateCreateTableSQL } from './db.js';
 import { parsePDFTableToJSON } from './llm.js';
 
 const MAX_ROWS = 100000;
 const MAX_COLUMNS = 200;
+const MAX_PARSER_BYTES = 50 * 1024 * 1024;
 
 // ─── File Processing Entry Point ─────────────────────────────────────────────
 
@@ -83,20 +85,17 @@ export async function processAndImportFile(filePath, originalFilename, { replace
 // ─── Excel Parser ────────────────────────────────────────────────────────────
 
 async function parseExcel(filePath) {
-  const fileBuffer = fs.readFileSync(filePath);
-  const workbook = xlsx.read(fileBuffer, { type: 'buffer', cellDates: true });
-  const sheetName = workbook.SheetNames[0];
-  const ws = workbook.Sheets[sheetName];
-
-  if (!ws['!ref']) return { headers: [], rows: [] };
-
-  const sheetData = xlsx.utils.sheet_to_json(ws, { header: 1, defval: null });
+  const { size } = await fs.promises.stat(filePath);
+  if (size > MAX_PARSER_BYTES) throw new Error('Spreadsheet exceeds the parser size limit.');
+  const sheetData = await readXlsxFile(filePath);
   if (sheetData.length < 2) return { headers: [], rows: [] };
 
   const rawHeaders = sheetData[0].map(h => String(h || '').trim());
+  if (rawHeaders.length > MAX_COLUMNS) throw new Error(`File exceeds the ${MAX_COLUMNS}-column limit.`);
   const rows = [];
 
   for (let i = 1; i < sheetData.length; i++) {
+    if (rows.length >= MAX_ROWS) throw new Error(`File exceeds the ${MAX_ROWS}-row limit.`);
     const rowData = sheetData[i];
     if (!rowData || rowData.every(v => v === null || v === '')) continue;
 
@@ -118,17 +117,24 @@ async function parseExcel(filePath) {
 
 // ─── CSV/TSV Parser ──────────────────────────────────────────────────────────
 
-function parseCSV(filePath, separator = ',') {
+export function parseCSV(filePath, separator = ',') {
   return new Promise((resolve, reject) => {
     const headers = [];
     const rows = [];
 
-    fs.createReadStream(filePath, { encoding: 'utf-8' })
-      .pipe(csv({ separator }))
+    const stream = fs.createReadStream(filePath, { encoding: 'utf-8' }).pipe(csv({ separator }));
+    stream
       .on('headers', (h) => {
         headers.push(...h.map(name => String(name).trim()));
+        if (headers.length > MAX_COLUMNS) {
+          stream.destroy(new Error(`File exceeds the ${MAX_COLUMNS}-column limit.`));
+        }
       })
       .on('data', (data) => {
+        if (rows.length >= MAX_ROWS) {
+          stream.destroy(new Error(`File exceeds the ${MAX_ROWS}-row limit.`));
+          return;
+        }
         const out = {};
         headers.forEach((h, idx) => {
           const keys = Object.keys(data);
@@ -144,11 +150,34 @@ function parseCSV(filePath, separator = ',') {
 
 // ─── JSON Parser ─────────────────────────────────────────────────────────────
 
-async function parseJSON(filePath) {
-  const rawData = fs.readFileSync(filePath, 'utf8');
-  const parsed = JSON.parse(rawData);
-  const dataArr = Array.isArray(parsed) ? parsed : [parsed];
+export async function parseJSON(filePath) {
+  const { size } = await fs.promises.stat(filePath);
+  if (size > MAX_PARSER_BYTES) throw new Error('JSON file exceeds the parser size limit.');
+  const firstByte = (await fs.promises.open(filePath, 'r'));
+  const buffer = Buffer.alloc(1);
+  await firstByte.read(buffer, 0, 1, 0);
+  await firstByte.close();
+  if (buffer.toString() !== '[') {
+    const parsed = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+    return normalizeJSONRows([parsed]);
+  }
+  const dataArr = [];
+  await new Promise((resolve, reject) => {
+    const input = fs.createReadStream(filePath).pipe(streamArray.withParserAsStream());
+    input.on('data', ({ value }) => {
+      if (dataArr.length >= MAX_ROWS) {
+        input.destroy(new Error(`File exceeds the ${MAX_ROWS}-row limit.`));
+        return;
+      }
+      dataArr.push(value);
+    });
+    input.on('end', resolve);
+    input.on('error', reject);
+  });
+  return normalizeJSONRows(dataArr);
+}
 
+function normalizeJSONRows(dataArr) {
   if (dataArr.length === 0) return { headers: [], rows: [] };
 
   // Collect all unique keys
@@ -160,6 +189,7 @@ async function parseJSON(filePath) {
   });
 
   const headers = Array.from(keySet);
+  if (headers.length > MAX_COLUMNS) throw new Error(`File exceeds the ${MAX_COLUMNS}-column limit.`);
   const rows = dataArr.map(r => {
     const out = {};
     headers.forEach(h => {
@@ -177,9 +207,11 @@ async function parseJSON(filePath) {
 // ─── PDF Parser ──────────────────────────────────────────────────────────────
 
 async function parsePDF(filePath) {
-  const dataBuffer = fs.readFileSync(filePath);
+  const { size } = await fs.promises.stat(filePath);
+  if (size > MAX_PARSER_BYTES) throw new Error('PDF exceeds the parser size limit.');
+  const dataBuffer = await fs.promises.readFile(filePath);
   const pdfData = await pdfParse(dataBuffer);
-  const rawText = pdfData.text;
+  const rawText = pdfData.text.slice(0, MAX_PARSER_BYTES);
 
   const dataArr = await parsePDFTableToJSON(rawText);
   if (!Array.isArray(dataArr) || dataArr.length === 0) {
@@ -194,6 +226,7 @@ async function parsePDF(filePath) {
   });
 
   const headers = Array.from(keySet);
+  if (headers.length > MAX_COLUMNS) throw new Error(`File exceeds the ${MAX_COLUMNS}-column limit.`);
   const rows = dataArr.map(r => {
     const out = {};
     headers.forEach(h => {

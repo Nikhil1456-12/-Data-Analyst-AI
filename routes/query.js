@@ -10,6 +10,10 @@ const router = Router();
 // In-memory cache
 const queryCache = new Map();
 
+export function formatSSE(event, data) {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
 // GET /api/query/stream — SSE streaming query pipeline
 router.get('/stream', optionalAuth, async (req, res) => {
   const { query, activeTable, mode } = req.query;
@@ -24,7 +28,7 @@ router.get('/stream', optionalAuth, async (req, res) => {
   });
 
   const send = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    res.write(formatSSE(event, data));
   };
 
   const startTime = Date.now();

@@ -6,6 +6,10 @@ import { uploadLimiter } from '../middleware/rateLimiter.js';
 
 const router = Router();
 
+export function isReplacementRequested(value) {
+  return value === 'true' || value === true;
+}
+
 const upload = multer({
   dest: 'uploads/',
   limits: {
@@ -32,7 +36,7 @@ router.post('/', uploadLimiter, optionalAuth, upload.array('files', 20), async (
   try {
     const results = [];
 
-    const replace = req.body.replace === 'true' || req.body.replace === true;
+    const replace = isReplacementRequested(req.body.replace);
     for (const file of req.files) {
       const result = await processAndImportFile(file.path, file.originalname, { replace });
       results.push({ filename: file.originalname, tableName: result.tableName, rowsImported: result.rowsCount, columns: result.columns, types: result.types });

@@ -10,6 +10,10 @@ test('accepts one read-only statement and rejects stacked SQL', () => {
 
 test('cleaning validation limits mutations to the requested table', () => {
   assert.equal(validateCleaningSQL('UPDATE `orders` SET amount = 0', 'orders'), 'UPDATE `orders` SET amount = 0');
+  assert.equal(validateCleaningSQL('UPDATE orders SET amount = 0, status = "closed"', 'orders'), 'UPDATE orders SET amount = 0, status = "closed"');
   assert.throws(() => validateCleaningSQL('DROP TABLE orders', 'orders'), /read-only|Unsafe/);
   assert.throws(() => validateCleaningSQL('DELETE FROM users', 'orders'), /unexpected table/);
+  assert.throws(() => validateCleaningSQL('UPDATE orders, users SET users.name = "x"', 'orders'), /unexpected|only the requested table/i);
+  assert.throws(() => validateCleaningSQL('DELETE FROM orders USING orders, users', 'orders'), /unexpected|only the requested table/i);
+  assert.throws(() => validateCleaningSQL('UPDATE orders SET amount = (SELECT amount FROM users)', 'orders'), /only the requested table/i);
 });
