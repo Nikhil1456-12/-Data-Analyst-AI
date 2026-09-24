@@ -1,10 +1,16 @@
 {
   "goal_id": "production-readiness",
   "status": "building",
-  "iteration": 1,
+  "iteration": 2,
   "builder_model": "GPT:5.6-Luna",
   "inspector_model": "GPT:5.6-Sol",
   "initial_sha": "f7dfa590a25328955a296d8587abbf3880b2ef25",
   "created_at": "2025-02-14T00:00:00Z",
-  "history": []
+  "history": [
+    {
+      "iteration": 1,
+      "verdict": "FAIL",
+      "summary": "Cleaning SQL can mutate unrelated tables, upload parser limits are enforced only after full materialization, and npm audit --omit=dev exits with a high-severity xlsx vulnerability."
+    }
+  ]
 }
