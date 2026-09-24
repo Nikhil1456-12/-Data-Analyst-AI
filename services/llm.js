@@ -254,7 +254,7 @@ Format as clean bullet points. Be concise and specific with numbers.`;
 
 // ─── PDF Table Extraction ────────────────────────────────────────────────────
 
-export async function parsePDFTableToJSON(rawText) {
+export async function parsePDFTableToJSON(rawText, { maxRows = 100000, maxColumns = 200 } = {}) {
   if (!rawText) return [];
   if (rawText.length > 30000) {
     rawText = rawText.slice(0, 30000) + '... (truncated)';
@@ -275,12 +275,49 @@ ${rawText}`;
   try {
     let raw = await llmCall([{ role: 'user', content: prompt }], 0);
     raw = stripMarkdown(raw);
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (raw.length > 10 * 1024 * 1024) {
+      throw new Error('PDF extraction result exceeds the safe parser limit.');
+    }
+    return parseBoundedArray(raw, maxRows, maxColumns);
   } catch (e) {
     console.error('[LLM] PDF parse error:', e.message);
+    if (/limit|exceeds/i.test(e.message)) throw e;
     return [];
   }
+}
+
+export function parseBoundedArray(raw, maxRows, maxColumns) {
+  if (!raw.trim().startsWith('[')) return [];
+  const values = [];
+  let start = raw.indexOf('[') + 1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < raw.length; i++) {
+    const char = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char === '{' || char === '[') depth++;
+    if (char === '}' || char === ']') depth--;
+    if ((char === ',' && depth === 0) || (char === ']' && depth === -1)) {
+      const item = raw.slice(start, i).trim();
+      if (item) {
+        if (values.length >= maxRows) throw new Error(`PDF exceeds the ${maxRows}-row limit.`);
+        const parsed = JSON.parse(item);
+        if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > maxColumns) {
+          throw new Error(`File exceeds the ${maxColumns}-column limit.`);
+        }
+        values.push(parsed);
+      }
+      start = i + 1;
+    }
+  }
+  return values;
 }
 
 // ─── NL to Regex (Data Extraction) ──────────────────────────────────────────

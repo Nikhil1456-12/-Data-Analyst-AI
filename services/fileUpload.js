@@ -1,6 +1,7 @@
 import fs from 'fs';
 import csv from 'csv-parser';
 import readXlsxFile from 'read-excel-file/node';
+import { Open } from 'unzipper-esm';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
@@ -88,9 +89,7 @@ export async function processAndImportFile(filePath, originalFilename, { replace
 export async function parseExcel(filePath) {
   const { size } = await fs.promises.stat(filePath);
   if (size > MAX_PARSER_BYTES) throw new Error('Spreadsheet exceeds the parser size limit.');
-  // read-excel-file has no row-streaming API. Keep the parser's allocation
-  // bounded by rejecting files whose on-disk representation is already too
-  // large, then enforce the row/column limits immediately after parsing.
+  await preflightExcel(filePath);
   const sheetData = await readXlsxFile(filePath);
   if (sheetData.length < 2) return { headers: [], rows: [] };
 
@@ -111,12 +110,52 @@ export async function parseExcel(filePath) {
       } else if (val !== null && val !== undefined) {
         val = String(val).trim();
       }
+
       out[h] = val || null;
     });
     rows.push(out);
   }
 
   return { headers: rawHeaders, rows };
+}
+
+function columnNumber(letters) {
+  return [...letters].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0);
+}
+
+export async function preflightExcel(filePath) {
+  const archive = await Open.file(filePath);
+  const worksheet = archive.files.find(entry => /^xl\/worksheets\/sheet\d+\.xml$/i.test(entry.path));
+  if (!worksheet) throw new Error('Spreadsheet does not contain a worksheet.');
+  let rows = 0;
+  let maxColumn = 0;
+  let carry = '';
+  await new Promise((resolve, reject) => {
+    const stream = worksheet.stream();
+    const inspect = chunk => {
+      carry += chunk.toString();
+      const splitAt = carry.lastIndexOf('<');
+      const complete = splitAt > 0 ? carry.slice(0, splitAt) : '';
+      carry = splitAt > 0 ? carry.slice(splitAt) : carry;
+      rows += (complete.match(/<row(?:\s|>)/g) || []).length;
+      for (const cell of complete.match(/<c[^>]*\br="([A-Z]+)\d+"/g) || []) {
+        const ref = cell.match(/\br="([A-Z]+)\d+"/i)?.[1];
+        if (ref) maxColumn = Math.max(maxColumn, columnNumber(ref));
+      }
+      if (rows > MAX_ROWS) stream.destroy(new Error(`File exceeds the ${MAX_ROWS}-row limit.`));
+      else if (maxColumn > MAX_COLUMNS) stream.destroy(new Error(`File exceeds the ${MAX_COLUMNS}-column limit.`));
+    };
+    stream.on('data', inspect).on('end', () => {
+      rows += (carry.match(/<row(?:\s|>)/g) || []).length;
+      for (const cell of carry.match(/<c[^>]*\br="([A-Z]+)\d+"/g) || []) {
+        const ref = cell.match(/\br="([A-Z]+)\d+"/i)?.[1];
+        if (ref) maxColumn = Math.max(maxColumn, columnNumber(ref));
+      }
+      if (rows > MAX_ROWS) return reject(new Error(`File exceeds the ${MAX_ROWS}-row limit.`));
+      if (maxColumn > MAX_COLUMNS) return reject(new Error(`File exceeds the ${MAX_COLUMNS}-column limit.`));
+      resolve();
+    }).on('error', reject);
+  });
 }
 
 // ─── CSV/TSV Parser ──────────────────────────────────────────────────────────
@@ -217,7 +256,7 @@ export async function parsePDF(filePath) {
   const pdfData = await pdfParse(dataBuffer);
   const rawText = pdfData.text.slice(0, MAX_PDF_TEXT_BYTES);
 
-  const dataArr = await parsePDFTableToJSON(rawText);
+  const dataArr = await parsePDFTableToJSON(rawText, { maxRows: MAX_ROWS, maxColumns: MAX_COLUMNS });
   if (!Array.isArray(dataArr) || dataArr.length === 0) {
     return { headers: [], rows: [] };
   }

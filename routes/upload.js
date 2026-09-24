@@ -11,8 +11,22 @@ export function isReplacementRequested(value) {
   return value === 'true' || value === true;
 }
 
+const diskStorage = multer.diskStorage({ destination: 'uploads/' });
+const trackedStorage = {
+  _handleFile(req, file, cb) {
+    diskStorage._handleFile(req, file, (error, info) => {
+      if (!error && info?.path) {
+        req._uploadedFilePaths = req._uploadedFilePaths || new Set();
+        req._uploadedFilePaths.add(info.path);
+      }
+      cb(error, info);
+    });
+  },
+  _removeFile: diskStorage._removeFile.bind(diskStorage)
+};
+
 const upload = multer({
-  dest: 'uploads/',
+  storage: trackedStorage,
   limits: {
     fileSize: 250 * 1024 * 1024, // 250 MB per file
     files: 20
@@ -29,16 +43,17 @@ const upload = multer({
 });
 
 export async function cleanupUploadedFiles(files = []) {
-  await Promise.all(files.map(async file => {
-    if (!file?.path) return;
-    try { await fs.unlink(file.path); } catch { /* already removed */ }
+  const paths = files instanceof Set ? [...files] : files.map(file => file?.path);
+  await Promise.all(paths.map(async filePath => {
+    if (!filePath) return;
+    try { await fs.unlink(filePath); } catch { /* already removed */ }
   }));
 }
 
 function parseUploads(req, res, next) {
   upload.array('files', 20)(req, res, async error => {
     if (!error) return next();
-    await cleanupUploadedFiles(req.files || []);
+    await cleanupUploadedFiles(req._uploadedFilePaths || req.files || []);
     error.status = error instanceof multer.MulterError ? 400 : (error.status || 400);
     return next(error);
   });
@@ -68,9 +83,9 @@ router.post('/', uploadLimiter, optionalAuth, parseUploads, async (req, res) => 
     });
   } catch (error) {
     console.error('[Upload] Error:', error.message);
-    res.status(500).json({ error: error.message || 'Failed to process uploaded files.' });
+    res.status(error.status || 500).json({ error: error.message || 'Failed to process uploaded files.' });
   } finally {
-    await cleanupUploadedFiles(req.files || []);
+    await cleanupUploadedFiles(req._uploadedFilePaths || req.files || []);
   }
 });
 
