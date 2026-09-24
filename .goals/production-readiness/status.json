@@ -1,7 +1,7 @@
 ﻿{
   "goal_id": "production-readiness",
   "status": "building",
-  "iteration": 3,
+  "iteration": 4,
   "builder_model": "GPT:5.6-Luna",
   "inspector_model": "GPT:5.6-Sol",
   "initial_sha": "f7dfa590a25328955a296d8587abbf3880b2ef25",
@@ -16,6 +16,11 @@
       "iteration": 2,
       "verdict": "FAIL",
       "summary": "Production audit is green and CSV/JSON limits improved, but stream cleaning still bypasses exact-target validation; Excel/PDF parsing remains post-materialization; Multer failure cleanup and meaningful replacement/SSE tests are missing."
+    },
+    {
+      "iteration": 3,
+      "verdict": "FAIL",
+      "summary": "Stream cleaning now uses the exact validator and the production audit remains clean, but Excel/PDF still materialize unbounded row structures, Multer partial-file cleanup is unproven/incomplete, and replacement/SSE tests do not exercise real endpoint and post-header failure paths."
     }
   ]
 }
