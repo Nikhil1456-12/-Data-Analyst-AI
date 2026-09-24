@@ -3,6 +3,7 @@ import { executeQuery, saveHistoryEntry, getDatabaseSchema } from '../services/d
 import { processNLQuery, generateInsights, generatePythonVizCode, generateSuggestions, generateCleaningQuery, generateExecutiveSummary } from '../services/llm.js';
 import { runPythonViz } from '../services/pythonViz.js';
 import { optionalAuth } from '../middleware/auth.js';
+import { validateGeneratedSQL, validateCleaningSQL } from '../services/sqlSecurity.js';
 
 const router = Router();
 
@@ -44,7 +45,12 @@ router.get('/stream', optionalAuth, async (req, res) => {
 
     // Step 2: Validate
     send('state', 'VALIDATING');
-    const normalizedSQL = sqlQuery.trim().toUpperCase();
+    if (mode === 'clean' && !activeTable) {
+      send('error', 'A target table is required for cleaning operations.');
+      return res.end();
+    }
+    sqlQuery = validateGeneratedSQL(sqlQuery, { allowMutation: mode === 'clean', tableName: mode === 'clean' ? activeTable : null });
+    const normalizedSQL = sqlQuery.toUpperCase();
     const isReadOnly = normalizedSQL.startsWith('SELECT') || normalizedSQL.startsWith('SHOW') || normalizedSQL.startsWith('DESCRIBE');
 
     // Allow cleaning/mutation queries if mode is 'clean'
@@ -156,8 +162,8 @@ router.post('/clean', optionalAuth, async (req, res) => {
     }
 
     const schema = await getDatabaseSchema();
-    const sql = await generateCleaningQuery(instruction, tableName, schema);
-    const result = await executeQuery(sql);
+    const sql = validateCleaningSQL(await generateCleaningQuery(instruction, tableName, schema), tableName);
+    const result = await executeQuery(sql, { allowMutation: true, tableName });
 
     // Invalidate cache
     queryCache.clear();

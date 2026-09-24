@@ -1,5 +1,6 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
+import { validateGeneratedSQL, validateIdentifier } from './sqlSecurity.js';
 
 dotenv.config();
 
@@ -39,6 +40,15 @@ export async function getDatabases() {
     .filter(db => !systemDbs.includes(db));
 }
 
+export async function tableExists(tableName) {
+  const safeName = validateIdentifier(tableName, 'table name');
+  const [rows] = await pool.execute(
+    'SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?',
+    [safeName]
+  );
+  return Number(rows[0]?.count) > 0;
+}
+
 // ─── Utility: Sanitize Identifiers ──────────────────────────────────────────
 
 export function sanitizeIdentifier(name, maxLen = 64) {
@@ -49,6 +59,8 @@ export function sanitizeIdentifier(name, maxLen = 64) {
   if (san.length > maxLen) san = san.slice(0, maxLen);
   return san || 'col';
 }
+
+export { validateGeneratedSQL, validateIdentifier };
 
 // ─── Smart Type Inference ────────────────────────────────────────────────────
 
@@ -134,9 +146,10 @@ ${columns.join(',\n')}
 
 // ─── Query Execution ─────────────────────────────────────────────────────────
 
-export async function executeQuery(sql) {
+export async function executeQuery(sql, options = {}) {
   try {
-    const [rows] = await pool.execute(sql);
+    const safeSQL = validateGeneratedSQL(sql, options);
+    const [rows] = await pool.execute(safeSQL);
     return rows;
   } catch (error) {
     console.error('[DB] Query error:', error.message);

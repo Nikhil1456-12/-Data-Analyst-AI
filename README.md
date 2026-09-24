@@ -13,7 +13,7 @@ Professional AI-powered data analysis platform. Upload datasets, ask natural lan
 - **PDF Report Export** — Generate professional reports with insights, charts, tables, and SQL
 - **Visualization Engine** — Auto-generated matplotlib/seaborn charts (sandboxed Python execution)
 - **Relationship Detection** — Automatically identifies FK patterns and shared columns across tables
-- **Authentication** — JWT-based auth with optional enable/disable toggle
+- **Authentication** — JWT-based auth; all data routes require a valid token (health, register, and login are public)
 - **Rate Limiting** — Configurable request throttling per endpoint type
 - **Query History** — Full audit log with re-run capability
 
@@ -44,7 +44,23 @@ cd client && npm run dev  # Frontend on :5173
 
 # Or build for production
 npm run build && npm start
+
+# Quality gates
+npm test
+npm run lint
+npm audit --omit=dev
 ```
+
+Set a long, random `JWT_SECRET` before starting in production. Uploading a file
+whose table already exists is rejected; send the explicit `replace=true` form
+field only when replacement is intended.
+
+The production dependency audit is expected to report the remaining `xlsx`
+advisories: the package's latest npm release is still `0.18.5` and no patched
+release is available. Spreadsheet uploads are constrained by file, row, and
+column limits and are parsed server-side; monitor this residual and migrate to
+a maintained parser before accepting untrusted workbooks at higher risk
+levels.
 
 ## API Endpoints
 

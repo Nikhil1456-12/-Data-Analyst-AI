@@ -8,9 +8,12 @@ const pdfParse = require('pdf-parse');
 import { pool, sanitizeIdentifier, inferAllColumnTypes, generateCreateTableSQL } from './db.js';
 import { parsePDFTableToJSON } from './llm.js';
 
+const MAX_ROWS = 100000;
+const MAX_COLUMNS = 200;
+
 // ─── File Processing Entry Point ─────────────────────────────────────────────
 
-export async function processAndImportFile(filePath, originalFilename) {
+export async function processAndImportFile(filePath, originalFilename, { replace = false } = {}) {
   const ext = originalFilename.toLowerCase().split('.').pop();
   const tableName = sanitizeIdentifier(originalFilename.replace(/\.[^.]+$/, ''));
 
@@ -37,11 +40,11 @@ export async function processAndImportFile(filePath, originalFilename) {
       throw new Error(`Unsupported file type: .${ext}. Supported: .csv, .xlsx, .xls, .json, .pdf, .tsv, .txt`);
   }
 
-  // Clean up temp file
-  try { fs.unlinkSync(filePath); } catch (e) { /* ignore */ }
-
   if (rows.length === 0) {
     return { tableName, rowsCount: 0, columns: [], types: {} };
+  }
+  if (rows.length > MAX_ROWS || headers.length > MAX_COLUMNS) {
+    throw new Error(`File exceeds limits (${MAX_ROWS} rows, ${MAX_COLUMNS} columns).`);
   }
 
   // Sanitize headers
@@ -61,7 +64,7 @@ export async function processAndImportFile(filePath, originalFilename) {
   const typeMap = inferAllColumnTypes(sanitizedHeaders, cleanRows);
 
   // Import into database
-  await importToDatabase(tableName, sanitizedHeaders, typeMap, cleanRows);
+  await importToDatabase(tableName, sanitizedHeaders, typeMap, cleanRows, { replace });
 
   // Build type info for response
   const typeInfo = {};
@@ -207,14 +210,22 @@ async function parsePDF(filePath) {
 
 // ─── Database Import with Typed Columns ──────────────────────────────────────
 
-async function importToDatabase(tableName, headers, typeMap, rows) {
+async function importToDatabase(tableName, headers, typeMap, rows, { replace = false } = {}) {
   const connection = await pool.getConnection();
 
   try {
     const safeName = sanitizeIdentifier(tableName);
 
-    // Drop existing table
-    await connection.execute(`DROP TABLE IF EXISTS \`${safeName}\``);
+    const [existing] = await connection.execute(
+      'SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?',
+      [safeName]
+    );
+    if (Number(existing[0]?.count) > 0 && !replace) {
+      const error = new Error(`Table "${safeName}" already exists. Set replace=true to replace it.`);
+      error.status = 409;
+      throw error;
+    }
+    if (replace) await connection.execute(`DROP TABLE IF EXISTS \`${safeName}\``);
 
     // Create table with inferred types
     const createSQL = generateCreateTableSQL(tableName, headers, typeMap);
@@ -245,12 +256,14 @@ async function importToDatabase(tableName, headers, typeMap, rows) {
       }
     }
 
-    connection.release();
     console.log(`[Upload] Imported ${rows.length} rows into \`${safeName}\` with typed columns`);
 
   } catch (error) {
-    connection.release();
     console.error('[Upload] Import error:', error.message);
-    throw new Error(`Database import failed: ${error.message}`);
+    const wrapped = new Error(`Database import failed: ${error.message}`);
+    wrapped.status = error.status;
+    throw wrapped;
+  } finally {
+    connection.release();
   }
 }

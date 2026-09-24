@@ -32,15 +32,10 @@ router.post('/', uploadLimiter, optionalAuth, upload.array('files', 20), async (
   try {
     const results = [];
 
+    const replace = req.body.replace === 'true' || req.body.replace === true;
     for (const file of req.files) {
-      const result = await processAndImportFile(file.path, file.originalname);
-      results.push({
-        filename: file.originalname,
-        tableName: result.tableName,
-        rowsImported: result.rowsCount,
-        columns: result.columns,
-        types: result.types
-      });
+      const result = await processAndImportFile(file.path, file.originalname, { replace });
+      results.push({ filename: file.originalname, tableName: result.tableName, rowsImported: result.rowsCount, columns: result.columns, types: result.types });
     }
 
     const summary = results.map(r => `${r.rowsImported} rows → \`${r.tableName}\``).join(', ');
@@ -53,6 +48,10 @@ router.post('/', uploadLimiter, optionalAuth, upload.array('files', 20), async (
   } catch (error) {
     console.error('[Upload] Error:', error.message);
     res.status(500).json({ error: error.message || 'Failed to process uploaded files.' });
+  } finally {
+    for (const file of req.files || []) {
+      try { await import('fs/promises').then(fs => fs.unlink(file.path)); } catch { /* already cleaned */ }
+    }
   }
 });
 

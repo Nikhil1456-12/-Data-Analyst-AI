@@ -16,6 +16,9 @@ export async function registerUser(username, password, role = 'analyst') {
   if (username.length < 3 || username.length > 50) {
     throw new Error('Username must be between 3 and 50 characters');
   }
+  if (!/^[A-Za-z0-9_.-]+$/.test(username)) {
+    throw new Error('Username contains invalid characters');
+  }
 
   // Check if user exists
   const [existing] = await pool.execute(
@@ -31,13 +34,13 @@ export async function registerUser(username, password, role = 'analyst') {
   // Insert user
   const [result] = await pool.execute(
     'INSERT INTO `__sys_users` (username, password_hash, role) VALUES (?, ?, ?)',
-    [username, passwordHash, role]
+    [username, passwordHash, 'analyst']
   );
 
-  const token = generateToken({ id: result.insertId, username, role });
+  const token = generateToken({ id: result.insertId, username, role: 'analyst' });
 
   return {
-    user: { id: result.insertId, username, role },
+    user: { id: result.insertId, username, role: 'analyst' },
     token
   };
 }
