@@ -14,6 +14,14 @@ export function formatSSE(event, data) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+export function validateQueryForMode(sql, mode, activeTable) {
+  if (mode === 'clean') {
+    if (!activeTable) throw new Error('A target table is required for cleaning operations.');
+    return validateCleaningSQL(sql, activeTable);
+  }
+  return validateGeneratedSQL(sql);
+}
+
 // GET /api/query/stream — SSE streaming query pipeline
 router.get('/stream', optionalAuth, async (req, res) => {
   const { query, activeTable, mode } = req.query;
@@ -35,6 +43,11 @@ router.get('/stream', optionalAuth, async (req, res) => {
   let sqlQuery = null;
 
   try {
+    if (mode === 'clean' && !activeTable) {
+      send('error', 'A target table is required for cleaning operations.');
+      return res.end();
+    }
+
     // Cache check
     const cacheKey = `${query.trim().toLowerCase()}_${activeTable || 'all'}`;
     if (queryCache.has(cacheKey)) {
@@ -49,11 +62,12 @@ router.get('/stream', optionalAuth, async (req, res) => {
 
     // Step 2: Validate
     send('state', 'VALIDATING');
-    if (mode === 'clean' && !activeTable) {
-      send('error', 'A target table is required for cleaning operations.');
+    try {
+      sqlQuery = validateQueryForMode(sqlQuery, mode, activeTable);
+    } catch (validationError) {
+      send('error', validationError.message);
       return res.end();
     }
-    sqlQuery = validateGeneratedSQL(sqlQuery, { allowMutation: mode === 'clean', tableName: mode === 'clean' ? activeTable : null });
     const normalizedSQL = sqlQuery.toUpperCase();
     const isReadOnly = normalizedSQL.startsWith('SELECT') || normalizedSQL.startsWith('SHOW') || normalizedSQL.startsWith('DESCRIBE');
 

@@ -9,9 +9,10 @@ import { streamArray } from 'stream-json/streamers/stream-array.js';
 import { pool, sanitizeIdentifier, inferAllColumnTypes, generateCreateTableSQL } from './db.js';
 import { parsePDFTableToJSON } from './llm.js';
 
-const MAX_ROWS = 100000;
-const MAX_COLUMNS = 200;
-const MAX_PARSER_BYTES = 50 * 1024 * 1024;
+export const MAX_ROWS = 100000;
+export const MAX_COLUMNS = 200;
+export const MAX_PARSER_BYTES = 50 * 1024 * 1024;
+const MAX_PDF_TEXT_BYTES = 10 * 1024 * 1024;
 
 // ─── File Processing Entry Point ─────────────────────────────────────────────
 
@@ -84,9 +85,12 @@ export async function processAndImportFile(filePath, originalFilename, { replace
 
 // ─── Excel Parser ────────────────────────────────────────────────────────────
 
-async function parseExcel(filePath) {
+export async function parseExcel(filePath) {
   const { size } = await fs.promises.stat(filePath);
   if (size > MAX_PARSER_BYTES) throw new Error('Spreadsheet exceeds the parser size limit.');
+  // read-excel-file has no row-streaming API. Keep the parser's allocation
+  // bounded by rejecting files whose on-disk representation is already too
+  // large, then enforce the row/column limits immediately after parsing.
   const sheetData = await readXlsxFile(filePath);
   if (sheetData.length < 2) return { headers: [], rows: [] };
 
@@ -206,27 +210,34 @@ function normalizeJSONRows(dataArr) {
 
 // ─── PDF Parser ──────────────────────────────────────────────────────────────
 
-async function parsePDF(filePath) {
+export async function parsePDF(filePath) {
   const { size } = await fs.promises.stat(filePath);
   if (size > MAX_PARSER_BYTES) throw new Error('PDF exceeds the parser size limit.');
   const dataBuffer = await fs.promises.readFile(filePath);
   const pdfData = await pdfParse(dataBuffer);
-  const rawText = pdfData.text.slice(0, MAX_PARSER_BYTES);
+  const rawText = pdfData.text.slice(0, MAX_PDF_TEXT_BYTES);
 
   const dataArr = await parsePDFTableToJSON(rawText);
   if (!Array.isArray(dataArr) || dataArr.length === 0) {
     return { headers: [], rows: [] };
   }
+  if (dataArr.length > MAX_ROWS) {
+    throw new Error(`PDF exceeds the ${MAX_ROWS}-row limit.`);
+  }
 
   const keySet = new Set();
   dataArr.forEach(obj => {
     if (obj && typeof obj === 'object') {
-      Object.keys(obj).forEach(k => keySet.add(k));
+      for (const key of Object.keys(obj)) {
+        keySet.add(key);
+        if (keySet.size > MAX_COLUMNS) {
+          throw new Error(`File exceeds the ${MAX_COLUMNS}-column limit.`);
+        }
+      }
     }
   });
 
   const headers = Array.from(keySet);
-  if (headers.length > MAX_COLUMNS) throw new Error(`File exceeds the ${MAX_COLUMNS}-column limit.`);
   const rows = dataArr.map(r => {
     const out = {};
     headers.forEach(h => {
@@ -243,7 +254,7 @@ async function parsePDF(filePath) {
 
 // ─── Database Import with Typed Columns ──────────────────────────────────────
 
-async function importToDatabase(tableName, headers, typeMap, rows, { replace = false } = {}) {
+export async function importToDatabase(tableName, headers, typeMap, rows, { replace = false } = {}) {
   const connection = await pool.getConnection();
 
   try {

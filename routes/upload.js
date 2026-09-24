@@ -3,6 +3,7 @@ import multer from 'multer';
 import { processAndImportFile } from '../services/fileUpload.js';
 import { optionalAuth } from '../middleware/auth.js';
 import { uploadLimiter } from '../middleware/rateLimiter.js';
+import fs from 'fs/promises';
 
 const router = Router();
 
@@ -27,8 +28,24 @@ const upload = multer({
   }
 });
 
+export async function cleanupUploadedFiles(files = []) {
+  await Promise.all(files.map(async file => {
+    if (!file?.path) return;
+    try { await fs.unlink(file.path); } catch { /* already removed */ }
+  }));
+}
+
+function parseUploads(req, res, next) {
+  upload.array('files', 20)(req, res, async error => {
+    if (!error) return next();
+    await cleanupUploadedFiles(req.files || []);
+    error.status = error instanceof multer.MulterError ? 400 : (error.status || 400);
+    return next(error);
+  });
+}
+
 // POST /api/upload
-router.post('/', uploadLimiter, optionalAuth, upload.array('files', 20), async (req, res) => {
+router.post('/', uploadLimiter, optionalAuth, parseUploads, async (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files uploaded' });
   }
@@ -53,9 +70,7 @@ router.post('/', uploadLimiter, optionalAuth, upload.array('files', 20), async (
     console.error('[Upload] Error:', error.message);
     res.status(500).json({ error: error.message || 'Failed to process uploaded files.' });
   } finally {
-    for (const file of req.files || []) {
-      try { await import('fs/promises').then(fs => fs.unlink(file.path)); } catch { /* already cleaned */ }
-    }
+    await cleanupUploadedFiles(req.files || []);
   }
 });
 
